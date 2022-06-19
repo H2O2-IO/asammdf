@@ -7,5 +7,6 @@ edition = "2021"
 
 [dependencies]
 asammdf_derive = {path="./asammdf_derive"}
+chrono = "0.4.19"
 indextree = "4.4.0"
 nom = "7.1.1"

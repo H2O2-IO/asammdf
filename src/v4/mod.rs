@@ -1,22 +1,29 @@
-use asammdf_derive::{id_object, mdf_object};
+use asammdf_derive::{comment_object, header_object, id_object, mdf_object, normal_object};
+use asammdf_derive::{IDObject, MDFObject, PermanentBlock};
 
 use super::SpecVer;
 use super::UnfinalizedFlagsType;
+use crate::DateTime;
 use crate::MDFObject;
 use crate::PermanentBlock;
-use crate::{v3::FloatPointFormat, ByteOrder};
+use crate::Utc;
+use crate::{IDObject, TimeFlagsType, TimeQualityType};
+
 mod parser;
 
+#[derive(Clone, Copy, Debug)]
 /// Zip type of a compression block
 pub enum Zip {
     Deflate,
     TransposeAndDeflate,
 }
 
+#[derive(Clone, Copy, Debug)]
 pub enum SRFlags {
     InvalidationBytes = 1,
 }
 
+#[derive(Clone, Copy, Debug)]
 pub enum Source {
     Other,
     ECU,
@@ -26,16 +33,19 @@ pub enum Source {
     User,
 }
 
+#[derive(Clone, Copy, Debug)]
 pub enum SourceFlags {
     SimulatedSource,
 }
 
+#[derive(Clone, Copy, Debug)]
 pub enum RangeType {
     Point,
     BeginRange,
     EndRange,
 }
 
+#[derive(Clone, Copy, Debug)]
 /// hierarchy type
 pub enum Hierarchy {
     Group,
@@ -49,6 +59,7 @@ pub enum Hierarchy {
     RefCharacteristic,
 }
 
+#[derive(Clone, Copy, Debug)]
 pub enum Event {
     Recording,
     RecordingInterrupt,
@@ -59,22 +70,26 @@ pub enum Event {
     Marker,
 }
 
+#[derive(Clone, Copy, Debug)]
 pub enum DataBlockFlags {
     EqualLength = 1,
 }
 
+#[derive(Clone, Copy, Debug)]
 pub enum ConversionFlags {
     PrecisionValid = 1,
     LimitRangeValid = 2,
     StatusString = 4,
 }
 
+#[derive(Clone, Copy, Debug)]
 pub enum ChannelGroupFlags {
     VariableLenSignalData = 1,
     BusEvent = 2,
     PlainBusEvent = 4,
 }
 
+#[derive(Clone, Copy, Debug)]
 pub enum ChannelFlags {
     Invalid = 1,
     InvalBytesValid = 2,
@@ -91,6 +106,7 @@ pub enum ChannelFlags {
     DefaultXAxis = 4096,
 }
 
+#[derive(Clone, Copy, Debug)]
 pub enum Cause {
     Other,
     Error,
@@ -99,6 +115,7 @@ pub enum Cause {
     User,
 }
 
+#[derive(Clone, Copy, Debug)]
 pub enum BusType {
     Other,
     CAN,
@@ -110,6 +127,7 @@ pub enum BusType {
     USB,
 }
 
+#[derive(Clone, Copy, Debug)]
 pub enum AttachmentFlags {
     EmbeddedData = 1,
     CompressedEmbbeddedData = 2,
@@ -118,31 +136,24 @@ pub enum AttachmentFlags {
 
 #[mdf_object]
 #[id_object]
-#[derive(Debug)]
+#[derive(Debug, MDFObject, IDObject, Clone, PermanentBlock)]
 pub struct IDBlock {
-    pub byte_order: Option<ByteOrder>,
-    pub code_page: u16,
     pub format_id: String,
-    pub float_point_format: Option<FloatPointFormat>,
     pub program_id: String,
 }
 
 impl IDBlock {
-    /// Create a v3::IDBlock with version default to `330`, spec_type default to `SpecVer::V3`
-    /// and float_point_format default to `FloatPointFormat::IEEE754`
-    fn new(program_id: String, code_page: u16) -> IDBlock {
+    /// Create a v4::IDBlock with version default to `410`, spec_type default to `SpecVer::V4`
+    fn new(program_id: String) -> IDBlock {
         IDBlock {
-            byte_order: None,
-            code_page,
-            format_id: "3.30    ".to_string(),
-            float_point_format: Some(FloatPointFormat::IEEE754),
+            format_id: "4.10    ".to_string(),
             program_id,
             block_size: 64,
             name: "ID".to_string(),
             file_id: "MDF     ".to_string(),
-            spec_type: Some(SpecVer::V3),
+            spec_type: Some(SpecVer::V4),
             unfinalized_flags: None,
-            version: 330,
+            version: 410,
             custom_flags: 0,
         }
     }
@@ -153,14 +164,33 @@ impl IDBlock {
     }
 }
 
-impl PermanentBlock for IDBlock {}
+#[comment_object]
+#[header_object]
+#[normal_object]
+pub struct HDBlock {
+    // TODO: store in arena,or inside this object?
+    pub ATBlocks: Vec<ATBlock>,
+    pub dst_offset: i16,
+    pub flags: TimeFlagsType,
+    pub start_angle: f64,
+    pub start_distance: f64,
+    pub time_quality: TimeQualityType,
+    pub utc_offset: i16,
+}
 
-impl MDFObject for IDBlock {
-    fn block_size(&self) -> u64 {
-        self.block_size
-    }
+#[comment_object]
+#[normal_object]
+pub struct ATBlock {
+    pub attachment_flags: Option<AttachmentFlags>,
+    pub creator_index: u16,
+    pub filename: String,
+    pub mime_type: String,
+}
 
-    fn name(&self) -> String {
-        self.name.clone()
-    }
+#[normal_object]
+#[comment_object]
+pub struct CHBlock {
+    // chblocks?
+    // dependency type?
+    pub hierarchy_type: Hierarchy,
 }

@@ -18,3 +18,4 @@ Cargo.lock
 # exclude test files
 mdf3.dat
 mdf4.mf4
+error.dbc
