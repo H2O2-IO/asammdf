@@ -1,9 +1,10 @@
 use std::{
     any::Any,
+    collections::HashMap,
     error::Error,
     fmt::Display,
     fs::File,
-    io::{self, BufReader, Read},
+    io::{self, BufReader, Read, SeekFrom},
 };
 
 use chrono::{DateTime, Utc};
@@ -95,7 +96,7 @@ pub enum FileType {
 }
 
 /// Support version of MDF specification
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SpecVer {
     /// support to v3.30
     V3,
@@ -141,13 +142,15 @@ pub enum TimeFlagsType {
     LocalTime = 1,
     OffsetsValid,
 }
+
+enum_u32_convert! {
 #[derive(Clone, Copy, Debug)]
 pub enum TimeQualityType {
     LocalPC,
     ExternalSource = 10,
     ExternalAbsolute = 16,
 }
-
+}
 enum_u32_convert! {
 #[derive(Clone, Copy, Debug)]
 pub enum UnfinalizedFlagsType {
@@ -248,6 +251,8 @@ pub struct MDFFile {
     file_handler: Option<File>,
     /// specification version read from ID block
     spec_ver: Option<SpecVer>,
+    /// a cache for link between id and blockid
+    link_id_blocks: HashMap<i64, BlockId>,
 }
 
 #[derive(Debug)]
@@ -265,6 +270,7 @@ impl MDFFile {
             source_file: Default::default(),
             file_handler: Default::default(),
             spec_ver: Default::default(),
+            link_id_blocks: HashMap::new(),
         }
     }
     /// open a file, and than parse PermanentBlocks
@@ -299,11 +305,24 @@ impl MDFFile {
         }
         self.source_file = file_path.clone();
         // init other blocks that should be stored in arena
-        self.init();
+        self.init().unwrap();
         Ok(())
     }
 
     fn init(&mut self) -> Result<(), MDFErrorKind> {
+        if self.spec_ver.is_some() && *self.spec_ver.as_ref().unwrap() == SpecVer::V3 {
+            // read byte order out of idblock
+            let byte_order = self.arena[*self.id.as_ref().unwrap()]
+                .get()
+                .downcast_ref::<v3::IDBlock>()
+                .unwrap()
+                .byte_order
+                .map_or(ByteOrder::LittleEndian, |x| x);
+            // v3::hdblock
+            v3::HDBlock::parse(byte_order, self);
+        } else if self.spec_ver.is_some() {
+        }
+
         todo!()
     }
 

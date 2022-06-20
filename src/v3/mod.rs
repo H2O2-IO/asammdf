@@ -1,15 +1,21 @@
+use std::collections::HashMap;
+use std::io::{BufReader, Read, Seek};
+
 use asammdf_derive::{
     channel_group_object, channel_object, comment_object, data_group_object, header_object,
     id_object, mdf_object, normal_object,
 };
 use asammdf_derive::{IDObject, MDFObject, PermanentBlock};
 use chrono::Local;
+use indextree::Arena;
+
+use self::parser::{header_block_basic, read_le_i16, read_le_u16, read_le_u64, read_str};
 
 use super::SpecVer;
 use super::UnfinalizedFlagsType;
-use crate::IDObject;
 use crate::MDFObject;
 use crate::PermanentBlock;
+use crate::{BlockId, IDObject, MDFErrorKind, MDFFile};
 use crate::{ByteOrder, ChannelType, RecordIDType, SignalType, SyncType, TimeQualityType};
 use crate::{DateTime, Utc};
 mod parser;
@@ -90,6 +96,7 @@ impl IDBlock {
 #[comment_object]
 #[header_object]
 #[normal_object]
+#[derive(Debug, MDFObject, Clone, PermanentBlock)]
 pub struct HDBlock {
     pub author: String,
     pub date: String,
@@ -99,17 +106,18 @@ pub struct HDBlock {
     pub subject: String,
     pub time: String,
     pub time_quality: Option<TimeQualityType>,
-    pub timer_id: String,
-    pub timestamp: i64,
-    pub utc_offset: i16,
+    pub timer_id: Option<String>,
+    pub timestamp: Option<u64>,
+    pub utc_offset: Option<i16>,
 
     link_first_file_group: u32,
     link_file_comment_txt: u32,
     link_program_block: u32,
+    pub name: String,
 }
 
 impl HDBlock {
-    fn new(date_time: DateTime<Local>, time_quality: TimeQualityType) -> HDBlock {
+    fn new(date_time: DateTime<Local>) -> HDBlock {
         HDBlock {
             author: Default::default(),
             date: date_time.format("%d:%m:%Y").to_string(),
@@ -118,20 +126,70 @@ impl HDBlock {
             project: Default::default(),
             subject: Default::default(),
             time: date_time.format("%H:%M:%S").to_string(),
-            time_quality: Some(time_quality),
-            timer_id: "Local PC Reference Time".to_string(),
-            timestamp: date_time.timestamp(),
-            utc_offset: (Local::now().offset().local_minus_utc() as f64 / 3600.0f64).round() as i16,
+            time_quality: None, //Some(time_quality),
+            timer_id: None,     //"Local PC Reference Time".to_string(),
+            timestamp: None,    //date_time.timestamp(),
+            utc_offset: None, //(Local::now().offset().local_minus_utc() as f64 / 3600.0f64).round() as i16,
             block_size: 208,
             id: "HD".to_string(),
             comment: Default::default(),
             link_file_comment_txt: 0,
             link_first_file_group: 0,
             link_program_block: 0,
+            name: Default::default(),
         }
     }
 
-    pub(crate) fn parse(byte_order: ByteOrder) {}
+    pub(crate) fn parse(byte_order: ByteOrder, instance: &mut MDFFile) -> Result<(), MDFErrorKind> {
+        // get file handler out
+        // when id block parsed, position of file handler inside MDFFile is 64.
+        let x = instance
+            .file_handler
+            .as_mut()
+            .unwrap()
+            .try_clone()
+            .map_err(|x| MDFErrorKind::IOError(x))?;
+        let mut buf_reader = BufReader::new(x);
+        // get the position of current stream
+        let pos = buf_reader.stream_position().unwrap();
+        // basic info bytes count is 164 bytes
+        let mut basic_info = [0; 164];
+        buf_reader.read_exact(&mut basic_info).unwrap();
+        let mut hd_block = header_block_basic(&basic_info).unwrap().1;
+        // optionals bytes
+        if buf_reader.stream_position().unwrap() - pos < hd_block.block_size {
+            // 8 bytes timestamp
+            let mut buf = [0; 8];
+            buf_reader.read_exact(&mut buf).unwrap();
+            hd_block.timestamp = Some(read_le_u64(&buf).unwrap().1);
+        }
+        if buf_reader.stream_position().unwrap() - pos < hd_block.block_size {
+            // 2 bytes utcoffset
+            let mut buf = [0; 2];
+            buf_reader.read_exact(&mut buf).unwrap();
+            hd_block.utc_offset = Some(read_le_i16(&buf).unwrap().1);
+        }
+        if buf_reader.stream_position().unwrap() - pos < hd_block.block_size {
+            // 2 bytes time quality type
+            let mut buf = [0; 2];
+            buf_reader.read_exact(&mut buf).unwrap();
+            let time_quality = read_le_u16(&buf).unwrap().1;
+            hd_block.time_quality = (time_quality as u32).try_into().map_or(None, |x| Some(x));
+        }
+        if buf_reader.stream_position().unwrap() - pos < hd_block.block_size {
+            // 32 bytes timer id bytes
+            let mut buf = [0; 32];
+            buf_reader.read_exact(&mut buf).unwrap();
+            hd_block.timer_id = Some(read_str(&buf, 32).unwrap().1);
+        }
+        let hd_id = instance.arena.new_node(Box::new(hd_block));
+        // add hd_block as id_block child
+        let id_id = instance.id.as_ref().unwrap().clone();
+        id_id.append(hd_id, &mut instance.arena);
+        // process date group block
+
+        Ok(())
+    }
 }
 
 #[normal_object]
