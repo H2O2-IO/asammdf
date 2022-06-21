@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use indextree::{Arena, NodeEdge, NodeId};
 pub mod v3;
 pub mod v4;
-
+pub mod misc;
 pub type BlockId = NodeId;
 
 macro_rules! enum_u32_convert {
@@ -51,41 +51,44 @@ impl Annotation {
 /// type alias for `Vec<Annotation>`
 type AnnotationList = Vec<Annotation>;
 
-#[derive(Clone, Copy, Debug)]
-/// Type of a channel
-pub enum ChannelType {
-    /// Fixed length data channel. Channal value is contained in record itself.
-    Data,
-    /// **Variable length signal data** channel
-    VariableData,
-    ///
-    Master,
-    VirtualMaster,
-    Sync,
-    /// Contained since MDF 4.1.0.
-    MaxLenData,
-    /// Contained since MDF 4.1.0.
-    VirtualData,
+enum_u32_convert! {
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    /// Type of a channel
+    pub enum ChannelType {
+        /// Fixed length data channel. Channal value is contained in record itself.
+        Data,
+        /// **Variable length signal data** channel
+        VariableData,
+        ///
+        Master,
+        VirtualMaster,
+        Sync,
+        /// Contained since MDF 4.1.0.
+        MaxLenData,
+        /// Contained since MDF 4.1.0.
+        VirtualData,
+    }
 }
-#[derive(Clone, Copy, Debug)]
-pub enum ConversionType {
-    ParametricLinear,
-    TabInt,
-    Tab,
-    Polynomial = 6,
-    Exponential,
-    Logarithmic,
-    Rational,
-    TextFormula,
-    TextTable,
-    TextRange,
-    Date = 132,
-    Time,
-    TabRange,
-    TextToValue,
-    TextToText,
+enum_u32_convert! {
+    #[derive(Clone, Copy, Debug)]
+    pub enum ConversionType {
+        ParametricLinear,
+        TabInt,
+        Tab,
+        Polynomial = 6,
+        Exponential,
+        Logarithmic,
+        Rational,
+        TextFormula,
+        TextTable,
+        TextRange,
+        Date = 132,
+        Time,
+        TabRange,
+        TextToValue,
+        TextToText,
+    }
 }
-
 /// File type of supported mdf file.
 #[derive(Clone, Copy, Debug)]
 pub enum FileType {
@@ -105,13 +108,13 @@ pub enum SpecVer {
 }
 #[derive(Clone, Copy, Debug)]
 pub enum RecordIDType {
-    None,
-    Before8Bit,
-    Before16Bit,
+    Before8Bit = 1,
+    Before16Bit = 2,
     Before32Bit = 4,
     Before64Bit = 8,
     BeforeAndAfter8Bit = 255,
 }
+
 #[derive(Clone, Copy, Debug)]
 pub enum SignalType {
     UIntLE,
@@ -130,6 +133,44 @@ pub enum SignalType {
     CANOPENData,
     CANOPENTime,
 }
+
+impl SignalType {
+    pub fn from_u16(value: u16, byte_order: ByteOrder) -> Option<SignalType> {
+        match value {
+            0 => {
+                if byte_order != ByteOrder::BigEndian {
+                    Some(SignalType::UIntLE)
+                } else {
+                    Some(SignalType::UIntBE)
+                }
+            }
+            1 => {
+                if byte_order != ByteOrder::BigEndian {
+                    Some(SignalType::SIntLE)
+                } else {
+                    Some(SignalType::SIntBE)
+                }
+            }
+            2 | 3 => {
+                if byte_order != ByteOrder::BigEndian {
+                    Some(SignalType::FloatLE)
+                } else {
+                    Some(SignalType::FloatBE)
+                }
+            }
+            7 => Some(SignalType::String),
+            8 => Some(SignalType::ByteArray),
+            9 => Some(SignalType::UIntBE),
+            10 => Some(SignalType::SIntBE),
+            11 | 12 => Some(SignalType::FloatBE),
+            13 => Some(SignalType::UIntLE),
+            14 => Some(SignalType::SIntLE),
+            15 | 16 => Some(SignalType::FloatLE),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum SyncType {
     Time,
@@ -159,7 +200,7 @@ pub enum UnfinalizedFlagsType {
 }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ByteOrder {
     BigEndian = 1,
     LittleEndian = 2,
@@ -238,6 +279,8 @@ pub trait CNObject {
 /// When write to MDF file, record block or other data block will be buffered (in vector), and directly write to file.
 trait PermanentBlock: MDFObject {}
 
+/// TODO: use mmap to parse file for better performance
+#[derive(Debug)]
 pub struct MDFFile {
     /// Note that only description node are stored inside arena
     arena: Arena<Box<dyn Any>>,
@@ -252,7 +295,7 @@ pub struct MDFFile {
     /// specification version read from ID block
     spec_ver: Option<SpecVer>,
     /// a cache for link between id and blockid
-    link_id_blocks: HashMap<i64, BlockId>,
+    link_id_blocks: HashMap<u64, BlockId>,
 }
 
 #[derive(Debug)]
@@ -273,6 +316,17 @@ impl MDFFile {
             link_id_blocks: HashMap::new(),
         }
     }
+
+    pub(crate) fn get_buf_reader(&mut self) -> Result<BufReader<File>, MDFErrorKind> {
+        let x = self
+            .file_handler
+            .as_mut()
+            .unwrap()
+            .try_clone()
+            .map_err(|x| MDFErrorKind::IOError(x))?;
+        Ok(BufReader::new(x))
+    }
+
     /// open a file, and than parse PermanentBlocks
     pub fn open(&mut self, file_path: String) -> Result<(), MDFErrorKind> {
         let mut file = File::open(&file_path).map_err(|x| MDFErrorKind::IOError(x))?;
@@ -353,8 +407,12 @@ impl MDFFile {
         })
     }
 
-    fn get_mut_node<T: 'static + PermanentBlock>(&mut self, id: BlockId) -> Option<&mut T> {
+    fn get_mut_node_by_id<T: 'static + PermanentBlock>(&mut self, id: BlockId) -> Option<&mut T> {
         self.arena[id].get_mut().downcast_mut::<T>()
+    }
+
+    fn get_node_by_id<T: 'static + PermanentBlock>(&mut self, id: BlockId) -> Option<&T> {
+        self.arena[id].get().downcast_ref::<T>()
     }
 
     /// TODO: delete this method, `BlockId` should not be exposed to outside.
@@ -419,10 +477,10 @@ mod tests {
         assert_eq!(x.file_id, "MDF     ");
         assert_eq!(x.version, 300);
         // test node edit
-        let id_ref_mut = file.get_mut_node::<v3::IDBlock>(id).unwrap();
+        let id_ref_mut = file.get_mut_node_by_id::<v3::IDBlock>(id).unwrap();
         (*id_ref_mut).version = 400;
         assert_eq!(id_ref_mut.version, 400);
-        let id_ref_mut2 = file.get_mut_node::<v3::IDBlock>(id).unwrap();
+        let id_ref_mut2 = file.get_mut_node_by_id::<v3::IDBlock>(id).unwrap();
         (*id_ref_mut2).version = 300;
         assert_eq!(id_ref_mut2.version, 300);
     }

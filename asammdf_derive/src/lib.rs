@@ -131,11 +131,7 @@ pub fn channel_object(_args: TokenStream, input:TokenStream) -> TokenStream{
         fields.named.push(get_field_def(quote! { pub bitmask_cache:u64}));
         fields.named.push(get_field_def(quote! { pub bit_offset:u16}));
         fields.named.push(get_field_def(quote! { pub channel_type:Option<ChannelType>}));
-        fields.named.push(get_field_def(quote! { pub max:f64}));
-        fields.named.push(get_field_def(quote! { pub max_ex:f64}));
         fields.named.push(get_field_def(quote! { pub max_raw:f64}));
-        fields.named.push(get_field_def(quote! { pub min:f64}));
-        fields.named.push(get_field_def(quote! { pub min_ex:f64}));
         fields.named.push(get_field_def(quote! { pub min_raw:f64}));
         fields.named.push(get_field_def(quote! { pub bits_count:u32}));
         fields.named.push(get_field_def(quote! { pub signal_type:Option<SignalType>}));

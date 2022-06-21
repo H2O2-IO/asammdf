@@ -9,4 +9,5 @@ edition = "2021"
 asammdf_derive = {path="./asammdf_derive"}
 chrono = "0.4.19"
 indextree = "4.4.0"
+itertools = "0.10.3"
 nom = "7.1.1"
