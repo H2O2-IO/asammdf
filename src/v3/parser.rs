@@ -1,11 +1,14 @@
-use crate::{ByteOrder, ChannelType, RecordIDType, SignalType};
+use crate::{ByteOrder, ChannelType, DependencyType, RecordIDType, SignalType};
 
-use super::{CCBlock, CGBlock, CNBlock, DGBlock, HDBlock, IDBlock, TRBlock, TXBlock, TriggerEvent};
+use super::{
+    CCBlock, CDBlock, CEBlock, CGBlock, CNBlock, DGBlock, DateType, DimType, HDBlock, IDBlock,
+    SRBlock, TRBlock, TXBlock, TimeType, TriggerEvent, VectorCANType,
+};
 use chrono::{DateTime, Local};
 use indextree::Descendants;
 use nom::bytes::complete::take;
 use nom::multi::count;
-use nom::number::complete::{le_f64, le_i16, le_u16, le_u32, le_u64};
+use nom::number::complete::{le_f64, le_i16, le_u16, le_u32, le_u64, le_u8};
 use nom::sequence::tuple;
 use nom::IResult;
 
@@ -141,11 +144,46 @@ pub(crate) fn tr_block_basic(input: &[u8]) -> IResult<&[u8], (TRBlock, u16)> {
     Ok((input, (tr_block, trigger_event_number)))
 }
 
+/// srblock basic info(24bytes)
+pub(crate) fn sr_block_basic(input: &[u8]) -> IResult<&[u8], SRBlock> {
+    let (
+        input,
+        (
+            (id, block_size),
+            link_next_sr,
+            link_data_block,
+            reduced_samples_number,
+            time_interval_len,
+        ),
+    ) = tuple((block_base_v3, le_u32, le_u32, le_u32, le_f64))(input)?;
+    let mut sr_block = SRBlock::new();
+    sr_block.id = String::from_utf8_lossy(id).trim_matches('\0').to_string();
+    sr_block.block_size = block_size as _;
+    sr_block.link_next_sr = link_next_sr;
+    sr_block.link_data_block = link_data_block;
+
+    Ok((input, sr_block))
+}
+
 pub(crate) fn trigger_evt(input: &[u8]) -> IResult<&[u8], TriggerEvent> {
     let (input, (time, pre_time, post_time)) = tuple((le_f64, le_f64, le_f64))(input)?;
 
     let mut trig_evt = TriggerEvent::new(time, pre_time, post_time);
     Ok((input, trig_evt))
+}
+
+/// datetype info(7bytes)
+pub(crate) fn parse_datetype(input: &[u8]) -> IResult<&[u8], DateType> {
+    let (input, (ms, minute, hour, day, month, year)) =
+        tuple((le_u16, le_u8, le_u8, le_u8, le_u8, le_u8))(input)?;
+    let date = DateType::new(ms, minute, hour, day, month, year);
+    Ok((input, date))
+}
+
+/// datetype info(7bytes)
+pub(crate) fn parse_timetype(input: &[u8]) -> IResult<&[u8], TimeType> {
+    let (input, (ms, day)) = tuple((le_u32, le_u8))(input)?;
+    Ok((input, TimeType::new(ms, day)))
 }
 
 /// ccblock basic info(46bytes)
@@ -165,12 +203,72 @@ pub(crate) fn cc_block_basic(input: &[u8], byte_order: ByteOrder) -> IResult<&[u
     let conversion_type = (conversion_type as u32)
         .try_into()
         .map_or(None, |x| Some(x));
-    let unit = String::from_utf8_lossy(id).trim_matches('\0').to_string();
+    let unit = String::from_utf8_lossy(unit).trim_matches('\0').to_string();
     let mut cc_block = CCBlock::new(conversion_type, unit, min, max);
     cc_block.id = String::from_utf8_lossy(id).trim_matches('\0').to_string();
     cc_block.block_size = block_size as _;
-
+    cc_block.tab_size = tab_size;
     Ok((input, cc_block))
+}
+
+/// ceblock basic info(6bytes)
+pub(crate) fn ce_block_basic(input: &[u8]) -> IResult<&[u8], CEBlock> {
+    let (input, ((id, block_size), ext_type)) = tuple((block_base_v3, le_u16))(input)?;
+    let mut ce_block = CEBlock::new();
+    ce_block.id = String::from_utf8_lossy(id).trim_matches('\0').to_string();
+    ce_block.block_size = block_size as _;
+    ce_block.extension_type = (ext_type as u32).try_into().map_or(None, |x| Some(x));
+
+    Ok((input, ce_block))
+}
+
+/// dim type(118 bytes)
+pub(crate) fn parse_dim_type(input: &[u8]) -> IResult<&[u8], DimType> {
+    let (input, (module, address, description, ecuid)) =
+        tuple((le_u16, le_u32, take(80u32), take(32u32)))(input)?;
+    let description = String::from_utf8_lossy(description)
+        .trim_matches('\0')
+        .to_string();
+    let ecuid = String::from_utf8_lossy(ecuid)
+        .trim_matches('\0')
+        .to_string();
+    Ok((input, DimType::new(module, address, description, ecuid)))
+}
+
+/// vector can type(80bytes)
+pub(crate) fn vector_can_type(input: &[u8]) -> IResult<&[u8], VectorCANType> {
+    let (input, (id, index, message, sender)) =
+        tuple((le_u32, le_u32, take(36u32), take(36u32)))(input)?;
+    let message = String::from_utf8_lossy(message)
+        .trim_matches('\0')
+        .to_string();
+    let sender = String::from_utf8_lossy(sender)
+        .trim_matches('\0')
+        .to_string();
+    Ok((input, VectorCANType::new(id, index, message, sender)))
+}
+
+// cdblock basic(8bytes)
+pub(crate) fn cdblock_basic(input: &[u8]) -> IResult<&[u8], (u16, CDBlock)> {
+    let (input, ((id, block_size), dependency_type, dependency_number)) =
+        tuple((block_base_v3, le_u16, le_u16))(input)?;
+
+    let mut cd_block = CDBlock::new();
+    cd_block.id = String::from_utf8_lossy(id).trim_matches('\0').to_string();
+    cd_block.block_size = block_size as _;
+    cd_block.dependency_type = dependency_type;
+
+    Ok((input, (dependency_number, cd_block)))
+}
+
+// dependency type(12bytes)
+pub(crate) fn dependency_type(input: &[u8]) -> IResult<&[u8], DependencyType> {
+    let (input, (link_dg, link_cg, link_cn)) = tuple((le_u32, le_u32, le_u32))(input)?;
+
+    Ok((
+        input,
+        DependencyType::new(link_dg as i64, link_cg as i64, link_cn as i64),
+    ))
 }
 
 /// cnblock basic info(218bytes)
@@ -214,10 +312,13 @@ pub(crate) fn cn_block_basic(input: &[u8], byte_order: ByteOrder) -> IResult<&[u
         le_f64,
     ))(input)?;
     let signal_type = SignalType::from_u16(signal_type, byte_order).unwrap();
-    let channel_type = (channel_type as u32)
-        .try_into()
-        .map_or(None, |x| Some(x))
-        .unwrap();
+    let channel_type = if channel_type == 0 {
+        ChannelType::Data
+    } else if channel_type == 1 {
+        ChannelType::Master
+    } else {
+        panic!()
+    };
     let name = String::from_utf8_lossy(name_bytes)
         .trim_matches('\0')
         .to_string();
@@ -312,6 +413,8 @@ pub(crate) fn dg_block_basic(input: &[u8]) -> IResult<&[u8], DGBlock> {
     ))(input)?;
 
     let mut dg_block = DGBlock::new();
+    dg_block.id = String::from_utf8_lossy(id).trim_matches('\0').to_string();
+    dg_block.block_size = block_size as _;
     dg_block.link_next_dgblock = link_next_dg_block;
     dg_block.link_next_cgblock = link_next_cg_block;
     dg_block.link_trblock = link_tr_block;
@@ -341,7 +444,7 @@ pub(crate) fn read_le_u16(input: &[u8]) -> IResult<&[u8], u16> {
     Ok(le_u16(input)?)
 }
 
-pub(crate) fn read_n_le_f64(input: &[u8],number:usize) -> IResult<&[u8], Vec<f64>> {
+pub(crate) fn read_n_le_f64(input: &[u8], number: usize) -> IResult<&[u8], Vec<f64>> {
     count(le_f64, number)(input)
 }
 

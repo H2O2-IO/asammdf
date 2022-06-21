@@ -11,19 +11,23 @@ use asammdf_derive::{
 use asammdf_derive::{IDObject, MDFObject, PermanentBlock};
 use chrono::Local;
 use indextree::Arena;
+use nom::InputLength;
 
 use self::parser::{
-    cg_block_basic, cn_block_basic, dg_block_basic, header_block_basic, read_le_i16, read_le_u16,
-    read_le_u32, read_le_u64, read_str, tr_block_basic, trigger_evt, tx_block_basic, cc_block_basic, read_n_le_f64,
+    cc_block_basic, cdblock_basic, ce_block_basic, cg_block_basic, cn_block_basic, dependency_type,
+    dg_block_basic, header_block_basic, parse_datetype, parse_dim_type, parse_timetype,
+    read_le_i16, read_le_u16, read_le_u32, read_le_u64, read_n_le_f64, read_str, sr_block_basic,
+    tr_block_basic, trigger_evt, tx_block_basic, vector_can_type,
 };
 
 use super::SpecVer;
 use super::UnfinalizedFlagsType;
-use crate::PermanentBlock;
+use crate::misc::transform_params;
 use crate::{BlockId, IDObject, MDFErrorKind, MDFFile};
 use crate::{ByteOrder, ChannelType, RecordIDType, SignalType, SyncType, TimeQualityType};
 use crate::{ConversionType, MDFObject};
 use crate::{DateTime, Utc};
+use crate::{DependencyType, PermanentBlock};
 mod parser;
 
 macro_rules! enum_u32_convert {
@@ -57,11 +61,13 @@ enum_u32_convert! {
     }
 }
 
-pub enum ExtensionType {
-    DIM = 2,
-    VectorCAN = 19,
+enum_u32_convert! {
+    #[derive(Debug, Clone)]
+    pub enum ExtensionType {
+        DIM = 2,
+        VectorCAN = 19,
+    }
 }
-
 #[mdf_object]
 #[id_object]
 #[derive(Debug, MDFObject, IDObject, Clone, PermanentBlock)]
@@ -224,10 +230,10 @@ impl HDBlock {
             group_id = DGBlock::parse(byte_order, hd_id, group_id, instance).unwrap();
         }
         // debug
-        println!(
-            "header children number is : {}",
-            hd_id.descendants(&mut instance.arena).count()
-        );
+        // get data channels number
+        println!("channel number: {:?}",instance.get_nodes::<CNBlock>().unwrap().len());
+        // get channel channels number
+        println!("channel group number: {:?}",instance.get_nodes::<CGBlock>().unwrap().len());
         Ok(())
     }
 }
@@ -361,7 +367,8 @@ impl CGBlock {
             cg_block.link_first_srblock = read_le_u32(&buf).unwrap().1;
         }
         let result = cg_block.link_next_cgblock;
-
+        let cn_link = cg_block.link_first_cnblock;
+        let sr_link = cg_block.link_first_srblock;
         // parse comment block
         let comment_block = TXBlock::parse(instance, cg_block.link_cg_comment as u64);
         cg_block.comment = comment_block
@@ -375,8 +382,15 @@ impl CGBlock {
         parent_id.append(cg_id, &mut instance.arena);
 
         // parse channel blocks
-
+        let mut cn_link = cn_link as u64;
+        while cn_link > 0 {
+            cn_link = CNBlock::parse(byte_order, cg_id, cn_link, instance)?;
+        }
         // parse srblocks
+        let mut sr_link = sr_link as u64;
+        while sr_link > 0 {
+            sr_link = SRBlock::parse(byte_order, cg_id, sr_link, instance)?;
+        }
 
         buf_reader.seek(SeekFrom::Start(pos)).unwrap();
         Ok(result as u64)
@@ -463,7 +477,7 @@ impl CNBlock {
         let mut buf_reader = instance.get_buf_reader()?;
         let pos = buf_reader.stream_position().unwrap();
         buf_reader.seek(SeekFrom::Start(link_id)).unwrap();
-        let mut buf = [0; 26];
+        let mut buf = [0; 218];
         buf_reader.read_exact(&mut buf).unwrap();
         let mut cn_block = cn_block_basic(&buf, byte_order).unwrap().1;
 
@@ -498,18 +512,84 @@ impl CNBlock {
         // parse display name
         let displayname_block =
             TXBlock::parse(instance, cn_block.link_signal_display_identifier as u64);
-        cn_block.long_name = displayname_block
+        cn_block.display_name = displayname_block
             .as_ref()
             .map_or(Default::default(), |x| x.text.clone());
         let displayname_id = displayname_block.map(|x| instance.arena.new_node(Box::new(x)));
 
-        // parse ccblock
-        if cn_block.link_ccblock > 0 {}
-        // parse ceblock
-        if cn_block.link_ceblock > 0 {}
-        // parse cdblock
-        if cn_block.link_cdblock > 0 {}
+        let link_ccblock = cn_block.link_ccblock;
+        let link_ceblock = cn_block.link_ceblock;
+        let link_cdblock = cn_block.link_cdblock;
+        let cn_id = instance.arena.new_node(Box::new(cn_block));
 
+        // parse ccblock
+        if link_ccblock > 0 {
+            let node_id = CCBlock::parse(byte_order, cn_id, link_ccblock as u64, instance)?;
+        }
+        // parse ceblock
+        if link_ceblock > 0 {
+            let node_id = CEBlock::parse(byte_order, cn_id, link_ceblock as u64, instance)?;
+        }
+        // parse cdblock
+        if link_cdblock > 0 {
+            let node_id = CDBlock::parse(byte_order, cn_id, link_cdblock as u64, instance);
+        }
+        parent_id.append(cn_id, &mut instance.arena);
+        buf_reader.seek(SeekFrom::Start(pos)).unwrap();
+        // println!("CNBlock:{:?}",instance.get_node_by_id::<CNBlock>(cc_id));
+        Ok(result)
+    }
+}
+
+#[normal_object]
+#[derive(Debug, Clone, PermanentBlock)]
+pub struct SRBlock {
+    /// Length of time interval(/s)
+    pub time_interval_len: f64,
+    /// Number of reduced samples
+    pub reduced_samples_number: u64,
+    link_data_block: u32,
+    link_next_sr: u32,
+}
+
+impl MDFObject for SRBlock {
+    fn block_size(&self) -> u64 {
+        self.block_size
+    }
+
+    fn name(&self) -> String {
+        self.id.to_string()
+    }
+}
+
+impl SRBlock {
+    pub fn new() -> SRBlock {
+        SRBlock {
+            time_interval_len: 0.0,
+            reduced_samples_number: 0,
+            id: "SR".to_string(),
+            block_size: 24,
+            link_data_block: 0,
+            link_next_sr: 0,
+        }
+    }
+
+    pub(crate) fn parse(
+        byte_order: ByteOrder,
+        parent_id: BlockId,
+        link_id: u64,
+        instance: &mut MDFFile,
+    ) -> Result<u64, MDFErrorKind> {
+        let mut buf_reader = instance.get_buf_reader()?;
+        let pos = buf_reader.stream_position().unwrap();
+        buf_reader.seek(SeekFrom::Start(link_id)).unwrap();
+        let mut buf = [0; 24];
+        buf_reader.read_exact(&mut buf).unwrap();
+        let mut sr_block = sr_block_basic(&buf).unwrap().1;
+        let result = sr_block.link_next_sr as u64;
+        println!("{:?}", sr_block);
+        let sr_id = instance.arena.new_node(Box::new(sr_block));
+        parent_id.append(sr_id, &mut instance.arena);
         buf_reader.seek(SeekFrom::Start(pos)).unwrap();
         Ok(result)
     }
@@ -524,8 +604,8 @@ pub struct CCBlock {
     pub default_text: String,
     pub foumula: String,
     pub inv_ccblock: Option<BlockId>,
-    pub tab_pairs: Option<HashMap<f64, f64>>,
-    pub text_table_pairs: Option<HashMap<f64, String>>,
+    pub tab_pairs: Option<Vec<(f64, f64)>>,
+    pub text_table_pairs: Option<Vec<(f64, String)>>,
     pub text_range_pairs: Option<HashMap<String, Range<f64>>>,
     pub max: f64,
     pub min: f64,
@@ -561,7 +641,7 @@ impl CCBlock {
             params: None,
             tab_size: 0,
             time: None,
-            unit: Default::default(),
+            unit: unit,
             id: "CC".to_string(),
             block_size: 46,
             comment: Default::default(),
@@ -577,58 +657,129 @@ impl CCBlock {
         let mut buf_reader = instance.get_buf_reader()?;
         let pos = buf_reader.stream_position().unwrap();
         buf_reader.seek(SeekFrom::Start(link_id)).unwrap();
-        let mut buf = [0; 26];
+        let mut buf = [0; 46];
         buf_reader.read_exact(&mut buf).unwrap();
         let mut cc_block = cc_block_basic(&buf, byte_order).unwrap().1;
-        
+        // println!("{:?}", x.display_name);
+        // println!("{:?}|{:?}", cc_block.conversion_type, cc_block.tab_size);
+        let pos_pos = buf_reader.stream_position().unwrap();
+        cc_block.parse_params(pos_pos, instance)?;
+        let cc_id = instance.arena.new_node(Box::new(cc_block));
+        parent_id.append(cc_id, &mut instance.arena);
         buf_reader.seek(SeekFrom::Start(pos)).unwrap();
-        Ok(result)
+        Ok(cc_id)
     }
 
-    fn parse_params(&mut self,instance: &mut MDFFile) {
-        let conv_type = match self.conversion_type {
-            Some(conv_type) => {
-                conv_type
-            },
-            _ => return
-        };
+    fn parse_params(&mut self, position: u64, instance: &mut MDFFile) -> Result<(), MDFErrorKind> {
         let mut buf_reader = instance.get_buf_reader().unwrap();
-        match conv_type {
-            ConversionType::ParametricLinear |
-            ConversionType::Polynomial |
-            ConversionType::Exponential |
-            ConversionType::Logarithmic |
-            ConversionType::Rational => {
-                if self.tab_size > 0 {
-                    let mut buf = vec![0;(self.tab_size as usize)*8];
-                    buf_reader.read_exact(&mut buf).unwrap();
-                    let params = read_n_le_f64(&buf, self.tab_size as usize);
-                    
+        let pos = buf_reader.stream_position().unwrap();
+        buf_reader.seek(SeekFrom::Start(position)).unwrap();
+        match self.conversion_type {
+            Some(conv_type) => {
+                match conv_type {
+                    ConversionType::ParametricLinear
+                    | ConversionType::Polynomial
+                    | ConversionType::Exponential
+                    | ConversionType::Logarithmic
+                    | ConversionType::Rational => {
+                        if self.tab_size > 0 {
+                            let mut buf = vec![0; (self.tab_size as usize) * 8];
+                            buf_reader.read_exact(&mut buf).unwrap();
+                            let mut params = read_n_le_f64(&buf, self.tab_size as usize).unwrap().1;
+                            params = transform_params(params, Some(conv_type));
+                            self.params = Some(params);
+                        }
+                    }
+                    ConversionType::TabInt | ConversionType::Tab => {
+                        let mut tab_pairs = Vec::new();
+                        for _ in 0..self.tab_size {
+                            let mut buf = [0; 16];
+                            buf_reader.read_exact(&mut buf).unwrap();
+                            let key_var = read_n_le_f64(&buf, 2).unwrap().1;
+                            tab_pairs.push((key_var[0], key_var[1]));
+                        }
+                        self.tab_pairs = Some(tab_pairs);
+                        // println!("tab_pairs:{:?}",self.tab_pairs);
+                    }
+                    ConversionType::TextFormula => {
+                        let mut buf = vec![0; (self.tab_size as usize)];
+                        buf_reader.read_exact(&mut buf).unwrap();
+                        self.foumula = read_str(&buf, self.tab_size as u32).unwrap().1;
+                    }
+                    ConversionType::TextTable => {
+                        let mut text_table_pairs = Vec::new();
+                        for _ in 0..self.tab_size {
+                            let mut buf = [0; 8];
+                            buf_reader.read_exact(&mut buf).unwrap();
+                            let key = read_n_le_f64(&buf, 1).unwrap().1;
+                            let mut buf = [0; 32];
+                            buf_reader.read_exact(&mut buf).unwrap();
+                            let value = read_str(&buf, 32).unwrap().1;
+                            text_table_pairs.push((key[0], value));
+                        }
+                        self.text_table_pairs = Some(text_table_pairs);
+                        // println!("text_table_pairs:{:?}",self.text_table_pairs);
+                    }
+                    ConversionType::TextRange => {
+                        let mut text_range_pairs = HashMap::new();
+
+                        let mut buf = [0; 16];
+                        buf_reader.read_exact(&mut buf).unwrap();
+                        let mut buf = [0; 4];
+                        buf_reader.read_exact(&mut buf).unwrap();
+                        let link_default_text = read_le_u32(&buf).unwrap().1;
+                        let default_text_block = TXBlock::parse(instance, link_default_text as u64);
+                        self.comment = default_text_block
+                            .as_ref()
+                            .map_or(Default::default(), |x| x.text.clone());
+                        let comment_id =
+                            default_text_block.map(|x| instance.arena.new_node(Box::new(x)));
+
+                        for _ in 0..(self.tab_size - 1) {
+                            let mut buf = vec![0; 2 * 8];
+                            buf_reader.read_exact(&mut buf).unwrap();
+                            let min_max = read_n_le_f64(&buf, 2).unwrap().1;
+                            let range = Range {
+                                start: min_max[0],
+                                end: min_max[2],
+                            };
+                            let mut buf = [0; 4];
+                            buf_reader.read_exact(&mut buf).unwrap();
+                            let link_text = read_le_u32(&buf).unwrap().1;
+
+                            let text_block = TXBlock::parse(instance, link_text as u64);
+                            let text = text_block
+                                .as_ref()
+                                .map_or(Default::default(), |x| x.text.clone());
+                            let text_id = text_block.map(|x| instance.arena.new_node(Box::new(x)));
+
+                            text_range_pairs.insert(text, range);
+                        }
+                        self.text_range_pairs = Some(text_range_pairs);
+                        // println!("text_range_pairs:{:?}",self.text_range_pairs);
+                    }
+                    ConversionType::Date => {
+                        let mut buf = [0; 7];
+                        buf_reader.read_exact(&mut buf).unwrap();
+                        self.date = Some(parse_datetype(&buf).unwrap().1);
+                        // println!("date:{:?}",self.date);
+                    }
+                    ConversionType::Time => {
+                        let mut buf = [0; 5];
+                        buf_reader.read_exact(&mut buf).unwrap();
+                        self.time = Some(parse_timetype(&buf).unwrap().1);
+                        // println!("time:{:?}",self.time);
+                    }
+                    _ => {
+                        return Err(MDFErrorKind::CCBlockError(
+                            "Doesn't supported thid kind of conversion type!".into(),
+                        ));
+                    }
                 }
-            },
-            ConversionType::TabInt |
-            ConversionType::Tab => {
-
-            },
-            ConversionType::TextFormula => {
-
-            },
-            ConversionType::TextTable => {
-
-            },
-            ConversionType::TextRange => {
-
-            },
-            ConversionType::Date => {
-
-            },
-            ConversionType::Time => {
-
-            },
-            _ => {
-                panic!("Doesn't supported thid kind of conversion type in: {}",self.name());
             }
+            None => {}
         }
+        Ok(())
     }
 }
 
@@ -667,13 +818,92 @@ impl TimeType {
     }
 }
 
+/// Some extension blocks
 #[normal_object]
+#[derive(Debug, Clone, PermanentBlock)]
 pub struct CEBlock {
     pub dim: Option<DimType>,
     pub extension_type: Option<ExtensionType>,
     pub vector_can: Option<VectorCANType>,
 }
 
+impl MDFObject for CEBlock {
+    fn block_size(&self) -> u64 {
+        self.block_size
+    }
+
+    fn name(&self) -> String {
+        self.id.clone()
+    }
+}
+
+impl CEBlock {
+    pub fn new_with_dim(dim: DimType) -> CEBlock {
+        CEBlock {
+            dim: Some(dim),
+            extension_type: Some(ExtensionType::DIM),
+            vector_can: None,
+            id: "CE".to_string(),
+            block_size: 6,
+        }
+    }
+    pub fn new_with_vector_can(vector_can: VectorCANType) -> CEBlock {
+        CEBlock {
+            dim: None,
+            extension_type: Some(ExtensionType::VectorCAN),
+            vector_can: Some(vector_can),
+            id: "CE".to_string(),
+            block_size: 6,
+        }
+    }
+    pub fn new() -> CEBlock {
+        CEBlock {
+            dim: None,
+            extension_type: None,
+            vector_can: None,
+            id: "CE".to_string(),
+            block_size: 6,
+        }
+    }
+
+    pub(crate) fn parse(
+        byte_order: ByteOrder,
+        parent_id: BlockId,
+        link_id: u64,
+        instance: &mut MDFFile,
+    ) -> Result<BlockId, MDFErrorKind> {
+        let mut buf_reader = instance.get_buf_reader()?;
+        let pos = buf_reader.stream_position().unwrap();
+        buf_reader.seek(SeekFrom::Start(link_id)).unwrap();
+        let mut buf = [0; 6];
+        buf_reader.read_exact(&mut buf).unwrap();
+        let mut ce_block = ce_block_basic(&buf).unwrap().1;
+
+        match ce_block.extension_type {
+            Some(ExtensionType::DIM) => {
+                let mut buf = [0; 118];
+                buf_reader.read_exact(&mut buf).unwrap();
+                ce_block.dim = Some(parse_dim_type(&buf).unwrap().1);
+            }
+            Some(ExtensionType::VectorCAN) => {
+                let mut buf = [0; 80];
+                buf_reader.read_exact(&mut buf).unwrap();
+                ce_block.vector_can = Some(vector_can_type(&buf).unwrap().1);
+            }
+            None => {
+                //return Err(MDFErrorKind::CEBlockError("Extension type not supported!".into()));
+            }
+        }
+
+        let ce_id = instance.arena.new_node(Box::new(ce_block));
+        parent_id.append(ce_id, &mut instance.arena);
+        buf_reader.seek(SeekFrom::Start(pos)).unwrap();
+
+        Ok(ce_id)
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct DimType {
     pub address: u32,
     pub description: String,
@@ -692,10 +922,12 @@ impl DimType {
     }
 }
 
+/// Dependency block
 #[normal_object]
 #[derive(Debug, Clone, PermanentBlock)]
 pub struct CDBlock {
     pub dependency_type: u16,
+    pub dependencies: Option<Vec<DependencyType>>,
 }
 
 impl MDFObject for CDBlock {
@@ -714,7 +946,32 @@ impl CDBlock {
             dependency_type: 0,
             id: "CD".to_string(),
             block_size: 8,
+            dependencies: None,
         }
+    }
+
+    pub(crate) fn parse(
+        byte_order: ByteOrder,
+        parent_id: BlockId,
+        link_id: u64,
+        instance: &mut MDFFile,
+    ) -> Result<BlockId, MDFErrorKind> {
+        let mut buf_reader = instance.get_buf_reader()?;
+        let pos = buf_reader.stream_position().unwrap();
+        buf_reader.seek(SeekFrom::Start(link_id)).unwrap();
+        let mut buf = [0; 8];
+        buf_reader.read_exact(&mut buf).unwrap();
+        let (dependency_number, mut cd_block) = cdblock_basic(&buf).unwrap().1;
+        let mut dependencies = Vec::new();
+        for _ in 0..dependency_number {
+            let mut buf = [0; 12];
+            buf_reader.read_exact(&mut buf).unwrap();
+            dependencies.push(dependency_type(&buf).unwrap().1);
+        }
+        let cd_id = instance.arena.new_node(Box::new(cd_block));
+        parent_id.append(cd_id, &mut instance.arena);
+        buf_reader.seek(SeekFrom::Start(pos)).unwrap();
+        Ok(cd_id)
     }
 }
 
@@ -861,7 +1118,6 @@ impl TXBlock {
         let mut buf = [0; 4];
         buf_reader.read_exact(&mut buf).unwrap();
         let mut tx_block = tx_block_basic(&buf).unwrap().1;
-        println!("{}", tx_block.block_size);
         // get variable length text, len = tx_block.block_size - 4
         let len = tx_block.block_size - 4;
         if len > 0 {
@@ -877,21 +1133,5 @@ impl TXBlock {
         // pop prev stream pos
         buf_reader.seek(SeekFrom::Start(prev_pos)).unwrap();
         Some(tx_block)
-    }
-}
-
-pub struct DependencyType {
-    pub link_channel_group: i64,
-    pub link_channel: i64,
-    pub link_data_grup: i64,
-}
-
-impl DependencyType {
-    pub fn new(link_dg: i64, link_cg: i64, link_cn: i64) -> DependencyType {
-        DependencyType {
-            link_channel_group: link_cg,
-            link_channel: link_cn,
-            link_data_grup: link_dg,
-        }
     }
 }

@@ -4,14 +4,14 @@ use std::{
     error::Error,
     fmt::Display,
     fs::File,
-    io::{self, BufReader, Read, SeekFrom},
+    io::{self, BufReader, Read, Seek, SeekFrom},
 };
 
 use chrono::{DateTime, Utc};
 use indextree::{Arena, NodeEdge, NodeId};
+pub mod misc;
 pub mod v3;
 pub mod v4;
-pub mod misc;
 pub type BlockId = NodeId;
 
 macro_rules! enum_u32_convert {
@@ -72,7 +72,7 @@ enum_u32_convert! {
 enum_u32_convert! {
     #[derive(Clone, Copy, Debug)]
     pub enum ConversionType {
-        ParametricLinear,
+        ParametricLinear = 0,
         TabInt,
         Tab,
         Polynomial = 6,
@@ -249,6 +249,23 @@ pub trait CCObject {
     fn set_min(&self, min: f64);
 }
 
+#[derive(Debug, Clone)]
+pub struct DependencyType {
+    pub link_channel_group: i64,
+    pub link_channel: i64,
+    pub link_data_grup: i64,
+}
+
+impl DependencyType {
+    pub fn new(link_dg: i64, link_cg: i64, link_cn: i64) -> DependencyType {
+        DependencyType {
+            link_channel_group: link_cg,
+            link_channel: link_cn,
+            link_data_grup: link_dg,
+        }
+    }
+}
+
 pub trait DataContainer {
     fn get_reader(offset: i64);
     fn read_data(offset: i64) -> Option<Vec<u8>>;
@@ -302,6 +319,8 @@ pub struct MDFFile {
 pub enum MDFErrorKind {
     IOError(io::Error),
     IDBlockError(String),
+    CCBlockError(String),
+    CEBlockError(String),
 }
 
 impl MDFFile {
@@ -317,6 +336,7 @@ impl MDFFile {
         }
     }
 
+    /// when use buffer reader, make sure to use SeekFrom::Start
     pub(crate) fn get_buf_reader(&mut self) -> Result<BufReader<File>, MDFErrorKind> {
         let x = self
             .file_handler
@@ -325,6 +345,21 @@ impl MDFFile {
             .try_clone()
             .map_err(|x| MDFErrorKind::IOError(x))?;
         Ok(BufReader::new(x))
+    }
+
+    pub(crate) fn get_buf_reader_at_loc(
+        &mut self,
+        loc: u64,
+    ) -> Result<BufReader<File>, MDFErrorKind> {
+        let x = self
+            .file_handler
+            .as_mut()
+            .unwrap()
+            .try_clone()
+            .map_err(|x| MDFErrorKind::IOError(x))?;
+        let mut reader = BufReader::new(x);
+        reader.seek(SeekFrom::Start(loc)).unwrap();
+        Ok(reader)
     }
 
     /// open a file, and than parse PermanentBlocks
@@ -452,6 +487,14 @@ impl MDFFile {
     /// TODO: delete this method, `BlockId` should not be exposed to outside.
     fn append_node(&mut self, parent_id: BlockId, child_id: BlockId) {
         parent_id.append(child_id, &mut self.arena);
+    }
+
+    fn get_channels(&self) -> Vec<BlockId> {
+        todo!()
+    }
+
+    fn get_channel_groups(&self) -> Vec<BlockId> {
+        todo!()
     }
 }
 
