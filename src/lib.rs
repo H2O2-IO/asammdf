@@ -9,6 +9,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use indextree::{Arena, NodeEdge, NodeId};
+use itertools::Itertools;
 pub mod misc;
 pub mod v3;
 pub mod v4;
@@ -106,6 +107,20 @@ pub enum SpecVer {
     /// support to v4.10
     V4,
 }
+
+/// Value format to display data
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ValueFormat {
+    /// Physical values
+    Physical,
+    /// Raw values (decimal)
+    Raw,
+    /// Raw values (hexadecimal)
+    RawHex,
+    /// Raw values (binary)
+    RawBin,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum RecordIDType {
     Before8Bit = 1,
@@ -267,8 +282,8 @@ impl DependencyType {
 }
 
 pub trait DataContainer {
-    fn get_reader(offset: i64);
-    fn read_data(offset: i64) -> Option<Vec<u8>>;
+    // fn get_reader(&self, offset: u64,mdf_file: &MDFFile) -> Option<BufReader<File>>;
+    fn read_data(&self, offset: u64, length: u32, mdf_file: &mut MDFFile) -> Vec<u8>;
 }
 
 pub trait DGObject {
@@ -276,25 +291,38 @@ pub trait DGObject {
     fn record_id_type(&self) -> Option<RecordIDType>;
 }
 
-pub trait CGObject {
-    fn cnblocks(&self) -> Option<Vec<BlockId>>;
-    fn dgblock(&self) -> Option<BlockId>;
-    fn srblocks(&self) -> Option<Vec<BlockId>>;
+pub trait CGObject<'a, CN, DG, SR> {
+    fn cnblocks(&self, mdf_file: &'a MDFFile) -> Option<Vec<&'a CN>>;
+    fn dgblock(&self, mdf_file: &'a MDFFile) -> Option<&'a DG>;
+    fn srblocks(&self, mdf_file: &'a MDFFile) -> Option<Vec<&'a SR>>;
 
-    fn get_record_size(&self) -> i64;
+    fn get_record_size(&self, mdf_file: &'a MDFFile) -> i64;
 }
 
-pub trait CNObject {
-    fn read_position(&self, record_index: i64) -> i64;
-    fn ccblock(&self) -> Option<BlockId>;
-    fn cdblock(&self) -> Option<BlockId>;
-    fn ceblock(&self) -> Option<BlockId>;
-    fn cgblock(&self) -> Option<BlockId>;
+pub trait CNObject<'a, CC, CD, CE, CG> {
+    fn read_position(&self, mdf_file: &MDFFile, record_index: i64) -> i64;
+    fn ccblock(&self, mdf_file: &'a MDFFile) -> Option<&'a CC>;
+    fn cdblock(&self, mdf_file: &'a MDFFile) -> Option<&'a CD>;
+    fn ceblock(&self, mdf_file: &'a MDFFile) -> Option<&'a CE>;
+    fn cgblock(&self, mdf_file: &'a MDFFile) -> Option<&'a CG>;
+    fn max(&self) -> f64;
+    fn max_ex(&self) -> f64;
+    fn min(&self) -> f64;
+    fn min_ex(&self) -> f64;
 }
 
 /// Block that can be stored inside internal arena,
 /// When write to MDF file, record block or other data block will be buffered (in vector), and directly write to file.
-trait PermanentBlock: MDFObject {}
+pub trait PermanentBlock: MDFObject {}
+
+#[derive(Debug)]
+pub enum MDFErrorKind {
+    IOError(io::Error),
+    IDBlockError(String),
+    CCBlockError(String),
+    CEBlockError(String),
+    VersionError(String),
+}
 
 /// TODO: use mmap to parse file for better performance
 #[derive(Debug)]
@@ -313,14 +341,6 @@ pub struct MDFFile {
     spec_ver: Option<SpecVer>,
     /// a cache for link between id and blockid
     link_id_blocks: HashMap<u64, BlockId>,
-}
-
-#[derive(Debug)]
-pub enum MDFErrorKind {
-    IOError(io::Error),
-    IDBlockError(String),
-    CCBlockError(String),
-    CEBlockError(String),
 }
 
 impl MDFFile {
@@ -410,9 +430,12 @@ impl MDFFile {
             // v3::hdblock
             v3::HDBlock::parse(byte_order, self);
         } else if self.spec_ver.is_some() {
+        } else {
+            return Err(MDFErrorKind::VersionError(
+                "MDF Specification Verion unsupported!".into(),
+            ));
         }
-
-        todo!()
+        Ok(())
     }
 
     fn get_node<T: 'static + PermanentBlock>(&self) -> Option<&T> {
@@ -446,7 +469,7 @@ impl MDFFile {
         self.arena[id].get_mut().downcast_mut::<T>()
     }
 
-    fn get_node_by_id<T: 'static + PermanentBlock>(&mut self, id: BlockId) -> Option<&T> {
+    fn get_node_by_id<T: 'static + PermanentBlock>(&self, id: BlockId) -> Option<&T> {
         self.arena[id].get().downcast_ref::<T>()
     }
 
@@ -486,7 +509,7 @@ impl MDFFile {
 
     /// TODO: delete this method, `BlockId` should not be exposed to outside.
     fn append_node(&mut self, parent_id: BlockId, child_id: BlockId) {
-        parent_id.append(child_id, &mut self.arena);
+        parent_id.checked_append(child_id, &mut self.arena).unwrap();
     }
 
     fn get_channels(&self) -> Vec<BlockId> {
@@ -495,6 +518,96 @@ impl MDFFile {
 
     fn get_channel_groups(&self) -> Vec<BlockId> {
         todo!()
+    }
+
+    fn get_master_cnblock(&mut self, cgblock: BlockId) {}
+
+    pub fn get_child_node_by_id<T: 'static + PermanentBlock>(&self, id: BlockId) -> Option<&T> {
+        id.children(&self.arena)
+            .find_or_first(|x| self.arena[*x].get().downcast_ref::<T>().is_some())
+            .map_or(None, |z| self.arena[z].get().downcast_ref::<T>())
+    }
+
+    pub fn get_child_node_id_by_id<T: 'static + PermanentBlock>(
+        &self,
+        id: BlockId,
+    ) -> Option<BlockId> {
+        id.children(&self.arena)
+            .find_or_first(|x| self.arena[*x].get().downcast_ref::<T>().is_some())
+    }
+
+    pub fn get_ancestor_node_by_id<T: 'static + PermanentBlock>(&self, id: BlockId) -> Option<&T> {
+        id.ancestors(&self.arena)
+            .find_or_first(|x| self.arena[*x].get().downcast_ref::<T>().is_some())
+            .map_or(None, |z| self.arena[z].get().downcast_ref::<T>())
+    }
+
+    pub fn get_ancestor_node_id_by_id<T: 'static + PermanentBlock>(
+        &self,
+        id: BlockId,
+    ) -> Option<BlockId> {
+        id.ancestors(&self.arena)
+            .find_or_first(|x| self.arena[*x].get().downcast_ref::<T>().is_some())
+    }
+
+    pub fn get_data_cnblock(
+        &mut self,
+        format: ValueFormat,
+        cn_block: BlockId,
+        record_index: i64,
+    ) -> f64 {
+        let id = cn_block;
+        if self.spec_ver.is_some() && *self.spec_ver.as_ref().unwrap() == SpecVer::V3 {
+            let cn_block = self.get_node_by_id::<v3::CNBlock>(cn_block).unwrap();
+            if cn_block.cgblock(&self).unwrap().record_size == 0 {
+                f64::NAN
+            } else {
+                let record_size = cn_block.cgblock(self).unwrap().get_record_size(self);
+                let read_position = cn_block.read_position(self, record_index);
+                let data_record = cn_block
+                    .cgblock(self)
+                    .unwrap()
+                    .dgblock(self)
+                    .unwrap()
+                    .link_data_records;
+                let data =
+                    self.read_data(data_record as u64, read_position as u64, record_size as u32);
+                if data.len() == 0 {
+                    f64::NAN
+                } else {
+                    f64::NAN
+                }
+            }
+        } else {
+            f64::NAN
+        }
+    }
+
+    fn get_format_value_by_array() {}
+
+    fn read_data(&mut self, start: u64, offset: u64, length: u32) -> Vec<u8> {
+        let loc = start + offset;
+        let mut result = vec![0; length as usize];
+        let mut buf_reader = self.get_buf_reader_at_loc(loc).unwrap();
+        buf_reader.read_exact(&mut result).unwrap();
+        result
+    }
+}
+
+pub struct DataSample {
+    pub x: f64,
+    pub y: f64,
+}
+
+impl DataSample {
+    pub fn new(x: f64, y: f64) -> DataSample {
+        DataSample { x, y }
+    }
+}
+
+impl Display for DataSample {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[{}:{}]", self.x, self.y)
     }
 }
 
@@ -526,6 +639,16 @@ mod tests {
         let id_ref_mut2 = file.get_mut_node_by_id::<v3::IDBlock>(id).unwrap();
         (*id_ref_mut2).version = 300;
         assert_eq!(id_ref_mut2.version, 300);
+
+        let mut iter = file.get_node_ids::<v3::CNBlock>().unwrap().into_iter();
+        let x: Vec<f64> = iter
+            .map(|node_id| {
+                let temp = file.get_data_cnblock(ValueFormat::Physical, node_id, 0);
+                println!("{}", temp);
+                temp
+            })
+            .collect();
+        assert!(false);
     }
 
     #[test]

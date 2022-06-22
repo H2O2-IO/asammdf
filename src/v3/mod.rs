@@ -5,8 +5,8 @@ use std::result;
 use std::sync::mpsc::channel;
 
 use asammdf_derive::{
-    channel_group_object, channel_object, comment_object, data_group_object, header_object,
-    id_object, mdf_object, normal_object,
+    basic_object, channel_group_object, channel_object, comment_object, data_group_object,
+    header_object, id_object, mdf_object, normal_object,
 };
 use asammdf_derive::{IDObject, MDFObject, PermanentBlock};
 use chrono::Local;
@@ -23,7 +23,7 @@ use self::parser::{
 use super::SpecVer;
 use super::UnfinalizedFlagsType;
 use crate::misc::transform_params;
-use crate::{BlockId, IDObject, MDFErrorKind, MDFFile};
+use crate::{BlockId, CGObject, CNObject, DataContainer, IDObject, MDFErrorKind, MDFFile};
 use crate::{ByteOrder, ChannelType, RecordIDType, SignalType, SyncType, TimeQualityType};
 use crate::{ConversionType, MDFObject};
 use crate::{DateTime, Utc};
@@ -70,6 +70,7 @@ enum_u32_convert! {
 }
 #[mdf_object]
 #[id_object]
+#[basic_object]
 #[derive(Debug, MDFObject, IDObject, Clone, PermanentBlock)]
 pub struct IDBlock {
     pub byte_order: Option<ByteOrder>,
@@ -96,6 +97,7 @@ impl IDBlock {
             unfinalized_flags: None,
             version: 330,
             custom_flags: 0,
+            block_id: None,
         }
     }
 
@@ -108,6 +110,7 @@ impl IDBlock {
 #[comment_object]
 #[header_object]
 #[normal_object]
+#[basic_object]
 #[derive(Debug, Clone, PermanentBlock)]
 pub struct HDBlock {
     pub author: String,
@@ -157,6 +160,7 @@ impl HDBlock {
             link_file_comment_txt: 0,
             link_first_file_group: 0,
             link_program_block: 0,
+            block_id: None,
         }
     }
 
@@ -213,17 +217,20 @@ impl HDBlock {
             .map_or(Default::default(), |x| x.text.clone());
         let program_block_id = program_block.map(|x| instance.arena.new_node(Box::new(x)));
 
-        println!("{:?}", hd_block);
         let hd_id = instance.arena.new_node(Box::new(hd_block));
         // add hd_block as id_block child
         let id_id = instance.id.as_ref().unwrap().clone();
-        id_id.append(hd_id, &mut instance.arena);
+        instance
+            .get_mut_node_by_id::<IDBlock>(id_id)
+            .unwrap()
+            .block_id = Some(id_id);
+        id_id.checked_append(hd_id, &mut instance.arena).unwrap();
         // add comment and program specific data as child
         comment_id.map(|node_id| {
-            hd_id.append(node_id, &mut instance.arena);
+            hd_id.checked_append(node_id, &mut instance.arena).unwrap();
         });
         program_block_id.map(|node_id| {
-            hd_id.append(node_id, &mut instance.arena);
+            hd_id.checked_append(node_id, &mut instance.arena).unwrap();
         });
         // process date group block
         while group_id > 0 {
@@ -231,9 +238,15 @@ impl HDBlock {
         }
         // debug
         // get data channels number
-        println!("channel number: {:?}",instance.get_nodes::<CNBlock>().unwrap().len());
+        println!(
+            "channel number: {:?}",
+            instance.get_nodes::<CNBlock>().unwrap().len()
+        );
         // get channel channels number
-        println!("channel group number: {:?}",instance.get_nodes::<CGBlock>().unwrap().len());
+        println!(
+            "channel group number: {:?}",
+            instance.get_nodes::<CGBlock>().unwrap().len()
+        );
         Ok(())
     }
 }
@@ -241,12 +254,13 @@ impl HDBlock {
 #[normal_object]
 #[comment_object]
 #[data_group_object]
+#[basic_object]
 #[derive(Debug, Clone, PermanentBlock)]
 pub struct DGBlock {
-    link_data_records: u32,
-    link_next_cgblock: u32,
-    link_next_dgblock: u32,
-    link_trblock: u32,
+    pub(crate) link_data_records: u32,
+    pub(crate) link_next_cgblock: u32,
+    pub(crate) link_next_dgblock: u32,
+    pub(crate) link_trblock: u32,
     pub tr_block: Option<BlockId>,
 }
 
@@ -272,6 +286,7 @@ impl DGBlock {
             comment: Default::default(),
             record_id_type: None,
             tr_block: None,
+            block_id: None,
         }
     }
 
@@ -293,8 +308,14 @@ impl DGBlock {
         let result = dg_block.link_next_dgblock;
         // save this data group to arena, and add as hdblock's children
         let dg_id = instance.arena.new_node(Box::new(dg_block));
+        instance
+            .get_mut_node_by_id::<DGBlock>(dg_id)
+            .unwrap()
+            .block_id = Some(dg_id);
         instance.link_id_blocks.insert(link_id, dg_id);
-        parent_id.append(dg_id, &mut instance.arena);
+        parent_id
+            .checked_append(dg_id, &mut instance.arena)
+            .unwrap();
         // then parse cg blocks
         while cg_link > 0 {
             cg_link = CGBlock::parse(byte_order, dg_id, cg_link, instance).unwrap();
@@ -313,6 +334,7 @@ impl DGBlock {
 #[normal_object]
 #[channel_group_object]
 #[comment_object]
+#[basic_object]
 #[derive(Debug, Clone, PermanentBlock)]
 pub struct CGBlock {
     pub record_id: u16,
@@ -345,6 +367,7 @@ impl CGBlock {
             comment: comment,
             id: "CG".to_string(),
             block_size: 30,
+            block_id: None,
         }
     }
 
@@ -377,9 +400,15 @@ impl CGBlock {
         let comment_id = comment_block.map(|x| instance.arena.new_node(Box::new(x)));
         // save block to arena
         let cg_id = instance.arena.new_node(Box::new(cg_block));
-        comment_id.map(|node_id| cg_id.append(node_id, &mut instance.arena));
+        instance
+            .get_mut_node_by_id::<CGBlock>(cg_id)
+            .unwrap()
+            .block_id = Some(cg_id);
+        comment_id.map(|node_id| cg_id.checked_append(node_id, &mut instance.arena));
         instance.link_id_blocks.insert(link_id, cg_id);
-        parent_id.append(cg_id, &mut instance.arena);
+        parent_id
+            .checked_append(cg_id, &mut instance.arena)
+            .unwrap();
 
         // parse channel blocks
         let mut cn_link = cn_link as u64;
@@ -391,15 +420,56 @@ impl CGBlock {
         while sr_link > 0 {
             sr_link = SRBlock::parse(byte_order, cg_id, sr_link, instance)?;
         }
-
         buf_reader.seek(SeekFrom::Start(pos)).unwrap();
         Ok(result as u64)
+    }
+}
+
+impl<'a> CGObject<'a, CNBlock, DGBlock, SRBlock> for CGBlock {
+    fn cnblocks(&self, mdf_file: &'a MDFFile) -> Option<Vec<&'a CNBlock>> {
+        todo!()
+    }
+
+    fn dgblock(&self, mdf_file: &'a MDFFile) -> Option<&'a DGBlock> {
+        let id = self.block_id.clone();
+        id.map_or(None, |node_id| {
+            mdf_file.get_ancestor_node_by_id::<DGBlock>(node_id)
+        })
+    }
+
+    fn srblocks(&self, mdf_file: &'a MDFFile) -> Option<Vec<&'a SRBlock>> {
+        todo!()
+    }
+
+    fn get_record_size(&self, mdf_file: &'a MDFFile) -> i64 {
+        let mut size = self.record_size;
+        let record_id_type = self.dgblock(mdf_file).unwrap().record_id_type;
+        match record_id_type {
+            Some(RecordIDType::Before8Bit) => {
+                size += 1;
+            }
+            Some(RecordIDType::Before16Bit) => {
+                size += 2;
+            }
+            Some(RecordIDType::Before32Bit) => {
+                size += 4;
+            }
+            Some(RecordIDType::Before64Bit) => {
+                size += 8;
+            }
+            Some(RecordIDType::BeforeAndAfter8Bit) => {
+                size += 2;
+            }
+            _ => {}
+        }
+        size as i64
     }
 }
 
 #[normal_object]
 #[channel_object]
 #[comment_object]
+#[basic_object]
 #[derive(Debug, Clone, PermanentBlock)]
 pub struct CNBlock {
     pub description: String,
@@ -465,6 +535,7 @@ impl CNBlock {
             sync_type: None,
             unit: Default::default(),
             comment: Default::default(),
+            block_id: None,
         }
     }
 
@@ -534,10 +605,87 @@ impl CNBlock {
         if link_cdblock > 0 {
             let node_id = CDBlock::parse(byte_order, cn_id, link_cdblock as u64, instance);
         }
-        parent_id.append(cn_id, &mut instance.arena);
+        // save id to self
+        instance
+            .get_mut_node_by_id::<CNBlock>(cn_id)
+            .unwrap()
+            .block_id = Some(cn_id);
+        parent_id
+            .checked_append(cn_id, &mut instance.arena)
+            .unwrap();
         buf_reader.seek(SeekFrom::Start(pos)).unwrap();
         // println!("CNBlock:{:?}",instance.get_node_by_id::<CNBlock>(cc_id));
         Ok(result)
+    }
+}
+
+/// trait alias for specific `CNObject` trait
+trait CNObjectV3<'a>: CNObject<'a, CCBlock, CDBlock, CEBlock, CGBlock> {}
+
+impl<'a> CNObjectV3<'a> for CNBlock {}
+
+impl<'a> CNObject<'a, CCBlock, CDBlock, CEBlock, CGBlock> for CNBlock {
+    fn read_position(&self, mdf_file: &MDFFile, record_index: i64) -> i64 {
+        let id = self.block_id.clone();
+        let cg_block = self.cgblock(&mdf_file).unwrap();
+        let mut size = record_index * (cg_block.record_size as i64);
+        id.map_or(-1, |node_id| {
+            let dg_block = mdf_file
+                .get_ancestor_node_by_id::<DGBlock>(node_id)
+                .unwrap();
+            let record_type = dg_block.record_id_type;
+            match record_type {
+                Some(RecordIDType::Before8Bit) | Some(RecordIDType::BeforeAndAfter8Bit) => {
+                    size += 1;
+                }
+                _ => {}
+            }
+            size
+        })
+    }
+
+    fn ccblock(&self, mdf_file: &'a MDFFile) -> Option<&'a CCBlock> {
+        let id = self.block_id.clone();
+        id.map_or(None, |node_id| {
+            mdf_file.get_child_node_by_id::<CCBlock>(node_id)
+        })
+    }
+
+    fn cdblock(&self, mdf_file: &'a MDFFile) -> Option<&'a CDBlock> {
+        let id = self.block_id.clone();
+        id.map_or(None, |node_id| {
+            mdf_file.get_child_node_by_id::<CDBlock>(node_id)
+        })
+    }
+
+    fn ceblock(&self, mdf_file: &'a MDFFile) -> Option<&'a CEBlock> {
+        let id = self.block_id.clone();
+        id.map_or(None, |node_id| {
+            mdf_file.get_child_node_by_id::<CEBlock>(node_id)
+        })
+    }
+
+    fn cgblock(&self, mdf_file: &'a MDFFile) -> Option<&'a CGBlock> {
+        let id = self.block_id.clone();
+        id.map_or(None, |node_id| {
+            mdf_file.get_ancestor_node_by_id::<CGBlock>(node_id)
+        })
+    }
+
+    fn max(&self) -> f64 {
+        todo!()
+    }
+
+    fn max_ex(&self) -> f64 {
+        todo!()
+    }
+
+    fn min(&self) -> f64 {
+        todo!()
+    }
+
+    fn min_ex(&self) -> f64 {
+        todo!()
     }
 }
 
@@ -589,7 +737,9 @@ impl SRBlock {
         let result = sr_block.link_next_sr as u64;
         println!("{:?}", sr_block);
         let sr_id = instance.arena.new_node(Box::new(sr_block));
-        parent_id.append(sr_id, &mut instance.arena);
+        parent_id
+            .checked_append(sr_id, &mut instance.arena)
+            .unwrap();
         buf_reader.seek(SeekFrom::Start(pos)).unwrap();
         Ok(result)
     }
@@ -665,7 +815,9 @@ impl CCBlock {
         let pos_pos = buf_reader.stream_position().unwrap();
         cc_block.parse_params(pos_pos, instance)?;
         let cc_id = instance.arena.new_node(Box::new(cc_block));
-        parent_id.append(cc_id, &mut instance.arena);
+        parent_id
+            .checked_append(cc_id, &mut instance.arena)
+            .unwrap();
         buf_reader.seek(SeekFrom::Start(pos)).unwrap();
         Ok(cc_id)
     }
@@ -702,7 +854,7 @@ impl CCBlock {
                         // println!("tab_pairs:{:?}",self.tab_pairs);
                     }
                     ConversionType::TextFormula => {
-                        let mut buf = vec![0; (self.tab_size as usize)];
+                        let mut buf = vec![0; self.tab_size as usize];
                         buf_reader.read_exact(&mut buf).unwrap();
                         self.foumula = read_str(&buf, self.tab_size as u32).unwrap().1;
                     }
@@ -896,7 +1048,9 @@ impl CEBlock {
         }
 
         let ce_id = instance.arena.new_node(Box::new(ce_block));
-        parent_id.append(ce_id, &mut instance.arena);
+        parent_id
+            .checked_append(ce_id, &mut instance.arena)
+            .unwrap();
         buf_reader.seek(SeekFrom::Start(pos)).unwrap();
 
         Ok(ce_id)
@@ -969,7 +1123,9 @@ impl CDBlock {
             dependencies.push(dependency_type(&buf).unwrap().1);
         }
         let cd_id = instance.arena.new_node(Box::new(cd_block));
-        parent_id.append(cd_id, &mut instance.arena);
+        parent_id
+            .checked_append(cd_id, &mut instance.arena)
+            .unwrap();
         buf_reader.seek(SeekFrom::Start(pos)).unwrap();
         Ok(cd_id)
     }
@@ -1049,8 +1205,10 @@ impl TRBlock {
         let comment_id = comment_block.map(|x| instance.arena.new_node(Box::new(x)));
         // save tr block to arena
         let tr_id = instance.arena.new_node(Box::new(tr_block));
-        comment_id.map(|node_id| tr_id.append(node_id, &mut instance.arena));
-        parent_id.append(tr_id, &mut instance.arena);
+        comment_id.map(|node_id| tr_id.checked_append(node_id, &mut instance.arena));
+        parent_id
+            .checked_append(tr_id, &mut instance.arena)
+            .unwrap();
 
         buf_reader.seek(SeekFrom::Start(pos)).unwrap();
 

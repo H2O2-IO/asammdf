@@ -76,6 +76,22 @@ pub fn id_object(_args: TokenStream, input:TokenStream) -> TokenStream{
     .into();
 }
 
+/// add BlockId Ref to this block
+#[proc_macro_attribute]
+pub fn basic_object(_args: TokenStream, input:TokenStream) -> TokenStream{
+    let mut item_struct = parse_macro_input!(input as ItemStruct);
+    let _ = parse_macro_input!(_args as parse::Nothing);
+
+    if let syn::Fields::Named(ref mut fields) = item_struct.fields {
+        fields.named.push(get_field_def(quote! { block_id:Option<BlockId>}));
+    }
+
+    return quote! {
+        #item_struct
+    }
+    .into();
+}
+
 #[proc_macro_attribute]
 pub fn header_object(_args: TokenStream, input:TokenStream) -> TokenStream{
     let mut item_struct = parse_macro_input!(input as ItemStruct);
