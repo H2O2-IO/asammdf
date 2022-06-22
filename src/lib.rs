@@ -253,15 +253,7 @@ pub trait HDObject: CommentObject {
 }
 
 pub trait CCObject {
-    fn conversion_type(&self) -> Option<ConversionType>;
-    fn default_text(&self) -> Option<String>;
-    fn set_default_text(&self, default_text: String);
-    fn formula(&self) -> Option<String>;
-    fn set_formula(&self, formula: String);
-    fn max(&self) -> Option<f64>;
-    fn set_max(&self, max: f64);
-    fn min(&self) -> Option<f64>;
-    fn set_min(&self, min: f64);
+    fn to_physical(&self, value: f64, inversed: bool) -> f64;
 }
 
 #[derive(Debug, Clone)]
@@ -524,7 +516,7 @@ impl MDFFile {
 
     pub fn get_child_node_by_id<T: 'static + PermanentBlock>(&self, id: BlockId) -> Option<&T> {
         id.children(&self.arena)
-            .find_or_first(|x| self.arena[*x].get().downcast_ref::<T>().is_some())
+            .find(|x| self.arena[*x].get().downcast_ref::<T>().is_some())
             .map_or(None, |z| self.arena[z].get().downcast_ref::<T>())
     }
 
@@ -533,12 +525,12 @@ impl MDFFile {
         id: BlockId,
     ) -> Option<BlockId> {
         id.children(&self.arena)
-            .find_or_first(|x| self.arena[*x].get().downcast_ref::<T>().is_some())
+            .find(|x| self.arena[*x].get().downcast_ref::<T>().is_some())
     }
 
     pub fn get_ancestor_node_by_id<T: 'static + PermanentBlock>(&self, id: BlockId) -> Option<&T> {
         id.ancestors(&self.arena)
-            .find_or_first(|x| self.arena[*x].get().downcast_ref::<T>().is_some())
+            .find(|x| self.arena[*x].get().downcast_ref::<T>().is_some())
             .map_or(None, |z| self.arena[z].get().downcast_ref::<T>())
     }
 
@@ -547,7 +539,7 @@ impl MDFFile {
         id: BlockId,
     ) -> Option<BlockId> {
         id.ancestors(&self.arena)
-            .find_or_first(|x| self.arena[*x].get().downcast_ref::<T>().is_some())
+            .find(|x| self.arena[*x].get().downcast_ref::<T>().is_some())
     }
 
     pub fn get_data_cnblock(
@@ -583,7 +575,88 @@ impl MDFFile {
         }
     }
 
-    fn get_format_value_by_array() {}
+    fn get_format_value_by_array(
+        &mut self,
+        format: ValueFormat,
+        cn_block: BlockId,
+        data: Vec<u8>,
+        bit_no: i32,
+        inversed: bool,
+    ) -> f64 {
+        let mut result = f64::NAN;
+        if self.spec_ver.is_some() && *self.spec_ver.as_ref().unwrap() == SpecVer::V3 {
+            let cn_block = self.get_node_by_id::<v3::CNBlock>(cn_block).unwrap();
+            let change_endianess = should_change_endianess(if cn_block.channel_type.unwrap() == ChannelType::VirtualData {
+                SignalType::UIntLE
+            } else {
+                cn_block.signal_type.unwrap()
+            });
+
+            let mut offset = (cn_block.add_offset + cn_block.bit_offset as u32/ 8) as i32;
+            offset += bit_no;
+
+            let bit_offset_remain = (cn_block.bit_offset % 8) as i32;
+            // cal bit mask
+            let mut bit_mask = u64::MAX;
+            if bit_offset_remain > 0 || cn_block.bits_count % 8 > 0 {
+                bit_mask = 1;
+                let mut i = 1;
+                while i < cn_block.bits_count {
+                    bit_mask <<= 1;
+                    bit_mask |= 1;
+                    i += 1;
+                }
+            }
+
+            if cn_block.bits_count <= 8 {
+                // byte length
+                let mut byte = data[offset as usize];
+                byte = byte >> bit_offset_remain;
+                byte &= bit_mask as u8;
+                let signal_type = cn_block.signal_type;
+                match signal_type {
+                    Some(SignalType::SIntBE) |
+                    Some(SignalType::SIntLE) => {
+                        result = (byte as i8) as f64;
+                    },
+                    Some(SignalType::UIntBE) |
+                    Some(SignalType::UIntLE) => {
+                        result = byte as f64;
+                    },
+                    _ => {}
+                }
+            } else if cn_block.bits_count <= 16 {
+                // 2 byte length
+                let value_2byte:u16 = if change_endianess {
+                    todo!()
+                } else {
+                    todo!()
+                };
+
+
+            } else if cn_block.bits_count <= 32 {
+                // 4 byte length
+
+            } else {
+                // 8 byte length
+
+            }
+
+            // convert result to physical type
+        }
+
+
+        result
+    }
+
+    fn get_format_value_by_f64(
+        &mut self,
+        cn_block: BlockId,
+        data: f64,
+        inversed: bool,
+    ) {
+        
+    }
 
     fn read_data(&mut self, start: u64, offset: u64, length: u32) -> Vec<u8> {
         let loc = start + offset;
@@ -608,6 +681,28 @@ impl DataSample {
 impl Display for DataSample {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "[{}:{}]", self.x, self.y)
+    }
+}
+
+fn should_change_endianess(signal_type: SignalType)->bool{
+    match signal_type {
+        /// default is little endian
+        SignalType::UIntLE |
+        SignalType::SIntLE | 
+        SignalType::FloatLE | 
+        SignalType::StringUTF16LE => {
+            return false;
+        },
+        /// big endian should invert
+        SignalType::UIntBE |
+        SignalType::SIntBE |
+        SignalType::FloatBE |
+        SignalType::StringUTF16BE => {
+            return true;
+        },
+        _ => {
+            false
+        }
     }
 }
 
