@@ -315,6 +315,7 @@ pub enum MDFErrorKind {
 /// Example:
 /// 
 /// ```
+/// use asammdf::{MDFFile,SpecVer};
 /// let mut file = MDFFile::new();
 /// file.open("./mdf3.dat".to_string()).unwrap();
 /// assert_eq!(file.spec_ver,Some(SpecVer::V3));
@@ -334,7 +335,7 @@ pub struct MDFFile {
     /// file handler to the source file
     file_handler: Option<File>,
     /// specification version read from ID block
-    spec_ver: Option<SpecVer>,
+    pub spec_ver: Option<SpecVer>,
     /// a cache for link between id and blockid
     link_id_blocks: HashMap<u64, BlockId>,
 }
