@@ -310,7 +310,17 @@ pub enum MDFErrorKind {
     VersionError(String),
 }
 
-/// TODO: use mmap to parse file for better performance
+/// MDFFile
+/// 
+/// Example:
+/// 
+/// ```
+/// let mut file = MDFFile::new();
+/// file.open("./mdf3.dat".to_string()).unwrap();
+/// assert_eq!(file.spec_ver,Some(SpecVer::V3));
+/// ```
+/// 
+/// TODO: use memory map file to parse file for better performance
 #[derive(Debug)]
 pub struct MDFFile {
     /// Note that only description node are stored inside arena
@@ -330,6 +340,7 @@ pub struct MDFFile {
 }
 
 impl MDFFile {
+    /// create a new MDFFile
     pub fn new() -> MDFFile {
         MDFFile {
             arena: Arena::new(),
@@ -352,7 +363,7 @@ impl MDFFile {
             .map_err(|x| MDFErrorKind::IOError(x))?;
         Ok(BufReader::new(x))
     }
-
+    /// get BufReader of internal file handler at specific position
     pub(crate) fn get_buf_reader_at_loc(
         &mut self,
         loc: u64,
@@ -405,7 +416,7 @@ impl MDFFile {
     }
 
     fn init(&mut self) -> Result<(), MDFErrorKind> {
-        if self.spec_ver.is_some() && *self.spec_ver.as_ref().unwrap() == SpecVer::V3 {
+        if self.is_v3() {
             // read byte order out of idblock
             let byte_order = self.arena[*self.id.as_ref().unwrap()]
                 .get()
@@ -558,7 +569,7 @@ impl MDFFile {
         record_index: i64,
     ) -> f64 {
         let id = cn_block;
-        if self.spec_ver.is_some() && *self.spec_ver.as_ref().unwrap() == SpecVer::V3 {
+        if self.is_v3() {
             let cn_block = self.get_node_by_id::<v3::CNBlock>(cn_block).unwrap();
             if cn_block.cgblock(&self).unwrap().record_size == 0 {
                 f64::NAN
@@ -594,7 +605,7 @@ impl MDFFile {
         inversed: bool,
     ) -> f64 {
         let mut result = f64::NAN;
-        if self.spec_ver.is_some() && *self.spec_ver.as_ref().unwrap() == SpecVer::V3 {
+        if self.is_v3() {
             let cn_block = self.get_node_by_id::<v3::CNBlock>(cn_block).unwrap();
             let change_endianess = should_change_endianess(
                 if cn_block.channel_type.unwrap() == ChannelType::VirtualData {
@@ -710,13 +721,23 @@ impl MDFFile {
     /// get physical value of a data
     fn get_phys_value_by_f64(&mut self, cn_block: BlockId, data: f64, inversed: bool) -> f64 {
         let mut result = data;
-        if self.spec_ver.is_some() && *self.spec_ver.as_ref().unwrap() == SpecVer::V3 {
+        if self.is_v3() {
             let cn_block = self.get_node_by_id::<v3::CNBlock>(cn_block).unwrap();
             result = cn_block
                 .ccblock(self)
                 .map_or(data, |cc| cc.to_physical(result, inversed));
         }
         result
+    }
+
+    /// is MDFV3
+    pub fn is_v3(&mut self) -> bool {
+        self.spec_ver.is_some() && *self.spec_ver.as_ref().unwrap() == SpecVer::V3
+    }
+
+    /// is MDFV4
+    pub fn is_v4(&mut self) -> bool {
+        self.spec_ver.is_some() && *self.spec_ver.as_ref().unwrap() == SpecVer::V4
     }
 
     /// read data from internal file handler with provided start, offset and length
@@ -805,7 +826,6 @@ mod tests {
                 temp
             })
             .collect();
-        assert!(false);
     }
 
     #[test]
