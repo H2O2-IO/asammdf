@@ -1,0 +1,13 @@
+[package]
+name = "asammdf"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+asammdf_derive = {path="./asammdf_derive"}
+chrono = "0.4.19"
+indextree = "4.4.0"
+itertools = "0.10.3"
+nom = "7.1.1"
