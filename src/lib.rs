@@ -10,6 +10,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use indextree::{Arena, NodeEdge, NodeId};
 use itertools::Itertools;
+use misc::helper::{read_le_f32, read_le_f64, read_le_u16, read_le_u32, read_le_u64};
 pub mod misc;
 pub mod v3;
 pub mod v4;
@@ -567,7 +568,7 @@ impl MDFFile {
                 if data.len() == 0 {
                     f64::NAN
                 } else {
-                    f64::NAN
+                    self.get_format_value_by_array(format, id, data, 0, false)
                 }
             }
         } else {
@@ -586,13 +587,15 @@ impl MDFFile {
         let mut result = f64::NAN;
         if self.spec_ver.is_some() && *self.spec_ver.as_ref().unwrap() == SpecVer::V3 {
             let cn_block = self.get_node_by_id::<v3::CNBlock>(cn_block).unwrap();
-            let change_endianess = should_change_endianess(if cn_block.channel_type.unwrap() == ChannelType::VirtualData {
-                SignalType::UIntLE
-            } else {
-                cn_block.signal_type.unwrap()
-            });
+            let change_endianess = should_change_endianess(
+                if cn_block.channel_type.unwrap() == ChannelType::VirtualData {
+                    SignalType::UIntLE
+                } else {
+                    cn_block.signal_type.unwrap()
+                },
+            );
 
-            let mut offset = (cn_block.add_offset + cn_block.bit_offset as u32/ 8) as i32;
+            let mut offset = (cn_block.add_offset + cn_block.bit_offset as u32 / 8) as i32;
             offset += bit_no;
 
             let bit_offset_remain = (cn_block.bit_offset % 8) as i32;
@@ -615,47 +618,96 @@ impl MDFFile {
                 byte &= bit_mask as u8;
                 let signal_type = cn_block.signal_type;
                 match signal_type {
-                    Some(SignalType::SIntBE) |
-                    Some(SignalType::SIntLE) => {
+                    Some(SignalType::SIntBE) | Some(SignalType::SIntLE) => {
                         result = (byte as i8) as f64;
-                    },
-                    Some(SignalType::UIntBE) |
-                    Some(SignalType::UIntLE) => {
+                    }
+                    Some(SignalType::UIntBE) | Some(SignalType::UIntLE) => {
                         result = byte as f64;
-                    },
+                    }
                     _ => {}
                 }
             } else if cn_block.bits_count <= 16 {
                 // 2 byte length
-                let value_2byte:u16 = if change_endianess {
-                    todo!()
-                } else {
-                    todo!()
-                };
-
-
+                let offset = offset as usize;
+                let mut val = read_le_u16(&data[offset..(offset + 2)]).unwrap().1;
+                if change_endianess {
+                    val = val.to_be();
+                }
+                val = val >> bit_offset_remain;
+                val &= bit_mask as u16;
+                let signal_type = cn_block.signal_type;
+                match signal_type {
+                    Some(SignalType::SIntBE) | Some(SignalType::SIntLE) => {
+                        result = (val as i16) as f64;
+                    }
+                    Some(SignalType::UIntBE) | Some(SignalType::UIntLE) => {
+                        result = val as f64;
+                    }
+                    _ => {}
+                }
             } else if cn_block.bits_count <= 32 {
                 // 4 byte length
-
+                let offset = offset as usize;
+                let mut val = read_le_u32(&data[offset..(offset + 4)]).unwrap().1;
+                if change_endianess {
+                    val = val.to_be();
+                }
+                val = val >> bit_offset_remain;
+                val &= bit_mask as u32;
+                let signal_type = cn_block.signal_type;
+                match signal_type {
+                    Some(SignalType::SIntBE) | Some(SignalType::SIntLE) => {
+                        result = (val as i32) as f64;
+                    }
+                    Some(SignalType::UIntBE) | Some(SignalType::UIntLE) => {
+                        result = val as f64;
+                    }
+                    Some(SignalType::FloatBE) | Some(SignalType::FloatLE) => {
+                        result = read_le_f32(&val.to_le_bytes()).unwrap().1 as f64;
+                    }
+                    _ => {}
+                }
             } else {
                 // 8 byte length
-
+                let offset = offset as usize;
+                let mut val = read_le_u64(&data[offset..(offset + 8)]).unwrap().1;
+                if change_endianess {
+                    val = val.to_be();
+                }
+                val = val >> bit_offset_remain;
+                val &= bit_mask as u64;
+                let signal_type = cn_block.signal_type;
+                match signal_type {
+                    Some(SignalType::SIntBE) | Some(SignalType::SIntLE) => {
+                        result = (val as i64) as f64;
+                    }
+                    Some(SignalType::UIntBE) | Some(SignalType::UIntLE) => {
+                        result = val as f64;
+                    }
+                    Some(SignalType::FloatBE) | Some(SignalType::FloatLE) => {
+                        result = read_le_f64(&val.to_le_bytes()).unwrap().1 as f64;
+                    }
+                    _ => {}
+                }
             }
-
-            // convert result to physical type
         }
-
-
+        // convert result to physical type
+        if format == ValueFormat::Physical {
+            result = self.get_format_value_by_f64(cn_block, result, inversed);
+        }
         result
     }
 
-    fn get_format_value_by_f64(
-        &mut self,
-        cn_block: BlockId,
-        data: f64,
-        inversed: bool,
-    ) {
-        
+    fn get_format_value_by_f64(&mut self, cn_block: BlockId, data: f64, inversed: bool) -> f64 {
+        let mut result = data;
+        if self.spec_ver.is_some() && *self.spec_ver.as_ref().unwrap() == SpecVer::V3 {
+            let cn_block = self.get_node_by_id::<v3::CNBlock>(cn_block).unwrap();
+            result = cn_block
+                .ccblock(self)
+                .map_or(data, |cc| cc.to_physical(result, inversed));
+        }
+
+        result
     }
 
     fn read_data(&mut self, start: u64, offset: u64, length: u32) -> Vec<u8> {
@@ -684,30 +736,30 @@ impl Display for DataSample {
     }
 }
 
-fn should_change_endianess(signal_type: SignalType)->bool{
+fn should_change_endianess(signal_type: SignalType) -> bool {
     match signal_type {
-        /// default is little endian
-        SignalType::UIntLE |
-        SignalType::SIntLE | 
-        SignalType::FloatLE | 
-        SignalType::StringUTF16LE => {
+        // default is little endian
+        SignalType::UIntLE
+        | SignalType::SIntLE
+        | SignalType::FloatLE
+        | SignalType::StringUTF16LE => {
             return false;
-        },
-        /// big endian should invert
-        SignalType::UIntBE |
-        SignalType::SIntBE |
-        SignalType::FloatBE |
-        SignalType::StringUTF16BE => {
-            return true;
-        },
-        _ => {
-            false
         }
+        // big endian should invert
+        SignalType::UIntBE
+        | SignalType::SIntBE
+        | SignalType::FloatBE
+        | SignalType::StringUTF16BE => {
+            return true;
+        }
+        _ => false,
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::{fs::OpenOptions, io::Write};
+
     use super::*;
     #[test]
     fn mdf3_file_init() {
@@ -734,12 +786,19 @@ mod tests {
         let id_ref_mut2 = file.get_mut_node_by_id::<v3::IDBlock>(id).unwrap();
         (*id_ref_mut2).version = 300;
         assert_eq!(id_ref_mut2.version, 300);
-
+        // write val to file
+        let mut handle = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open("./test_result.txt")
+            .unwrap();
         let mut iter = file.get_node_ids::<v3::CNBlock>().unwrap().into_iter();
         let x: Vec<f64> = iter
             .map(|node_id| {
                 let temp = file.get_data_cnblock(ValueFormat::Physical, node_id, 0);
-                println!("{}", temp);
+                let name = file.get_node_by_id::<v3::CNBlock>(node_id).unwrap().name();
+                println!("({name},{temp})");
+                write!(handle, "{},{}\n", name, temp);
                 temp
             })
             .collect();

@@ -23,7 +23,7 @@ use self::parser::{
 
 use super::SpecVer;
 use super::UnfinalizedFlagsType;
-use crate::misc::{param_linear_array_i, transform_params, rational_param_array_i};
+use crate::misc::{param_linear_array_i, rational_param_array_i, transform_params};
 use crate::{
     BlockId, CCObject, CGObject, CNObject, DataContainer, IDObject, MDFErrorKind, MDFFile,
 };
@@ -964,71 +964,71 @@ impl CCObject for CCBlock {
                         if value < value_key {
                             return value_val;
                         }
-                        let (key,val) = tab_pairs[i];
+                        let (key, val) = tab_pairs[i];
                         if value < key {
-                            return (value - value_key)/(key - value_key)*(val - value_key) + value_val;
+                            return (value - value_key) / (key - value_key) * (val - value_key)
+                                + value_val;
                         }
                         value_key = key;
                         value_val = val;
                     }
                 }
                 value = value_val;
-            },
+            }
             Some(ConversionType::Tab) => {
                 if self.tab_pairs.is_some() {
                     let tab_pairs = self.tab_pairs.as_ref().unwrap();
-                    tab_pairs.iter().find(|(key,_)| {
-                        *key == value
-                    }).map(|(_,val)| {
-                        value = *val;
-                    });
+                    tab_pairs
+                        .iter()
+                        .find(|(key, _)| *key == value)
+                        .map(|(_, val)| {
+                            value = *val;
+                        });
                 }
-            },
-            Some(ConversionType::TextFormula) | 
-            Some(ConversionType::TextTable) |
-            Some(ConversionType::TextRange)
-             => {
-            },
-            Some(ConversionType::Polynomial)
-            => {
+            }
+            Some(ConversionType::TextFormula)
+            | Some(ConversionType::TextTable)
+            | Some(ConversionType::TextRange) => {}
+            Some(ConversionType::Polynomial) => {
                 if self.params.is_some() {
                     let params = self.params.as_ref().unwrap();
                     let v1 = value - params[4] - params[5];
                     let v2 = params[2] * v1 - params[0];
-                    value = (params[1] - params[3]*v1) / v2;
+                    value = (params[1] - params[3] * v1) / v2;
                 }
-            },
-            Some(ConversionType::Exponential)
-            => {
+            }
+            Some(ConversionType::Exponential) => {
                 if self.params.is_some() {
                     let params = self.params.as_ref().unwrap();
                     if params[0] == 0.0 {
-                        value = ((params[2]/(value - params[6]) - params[5])/params[3]).exp()/params[4]
+                        value = ((params[2] / (value - params[6]) - params[5]) / params[3]).exp()
+                            / params[4]
                     } else if params[3] == 0.0 {
-                        value = (((value - params[6])*params[5] - params[2])/params[0]).exp() / params[1];
+                        value = (((value - params[6]) * params[5] - params[2]) / params[0]).exp()
+                            / params[1];
                     }
                 }
-            },
-            Some(ConversionType::Logarithmic)
-            => {
+            }
+            Some(ConversionType::Logarithmic) => {
                 if self.params.is_some() {
                     let params = self.params.as_ref().unwrap();
                     if params[0] == 0.0 {
-                        value = ((params[2]/(value - params[6]) - params[5])/params[3]).exp()/params[4]
+                        value = ((params[2] / (value - params[6]) - params[5]) / params[3]).exp()
+                            / params[4]
                     } else if params[4] == 0.0 {
-                        value = (((value - params[6])*params[5] - params[2])/params[0]).exp() / params[1];
+                        value = (((value - params[6]) * params[5] - params[2]) / params[0]).exp()
+                            / params[1];
                     }
                 }
-            },
-            Some(ConversionType::Rational)
-            => {
+            }
+            Some(ConversionType::Rational) => {
                 if self.params.is_some()
                     && !itertools::equal(self.params.as_ref().unwrap(), &rational_param_array_i)
                 {
                     let params = self.params.as_ref().unwrap().clone();
                     let params = if inversed {
-                        transform_params(params,self.conversion_type)
-                    }else {
+                        transform_params(params, self.conversion_type)
+                    } else {
                         params
                     };
 
@@ -1037,14 +1037,11 @@ impl CCObject for CCBlock {
                     let v3 = params[5] * value - params[2];
 
                     if v1 == 0.0 || v1.is_nan() || v1.is_infinite() {
-                        value = - v3 / v2;
+                        value = -v3 / v2;
                     }
-
                 }
-            },
-            _ => {
-                
             }
+            _ => {}
         }
 
         value

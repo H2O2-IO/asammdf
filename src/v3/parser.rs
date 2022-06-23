@@ -5,7 +5,6 @@ use super::{
     SRBlock, TRBlock, TXBlock, TimeType, TriggerEvent, VectorCANType,
 };
 use chrono::{DateTime, Local};
-use indextree::Descendants;
 use nom::bytes::complete::take;
 use nom::multi::count;
 use nom::number::complete::{le_f64, le_i16, le_u16, le_u32, le_u64, le_u8};
