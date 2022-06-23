@@ -1,15 +1,13 @@
 use std::{
     any::Any,
     collections::HashMap,
-    error::Error,
     fmt::Display,
     fs::File,
     io::{self, BufReader, Read, Seek, SeekFrom},
 };
 
 use chrono::{DateTime, Utc};
-use indextree::{Arena, NodeEdge, NodeId};
-use itertools::Itertools;
+use indextree::{Arena, NodeId};
 use misc::helper::{read_le_f32, read_le_f64, read_le_u16, read_le_u32, read_le_u64};
 pub mod misc;
 pub mod v3;
@@ -233,28 +231,28 @@ pub trait MDFObject {
     // reference tag?
 }
 
-pub trait CommentObject: MDFObject {
-    fn comment(&self) -> String;
-}
+/// write self to a file
+pub trait Writer {}
 
 pub trait IDObject: MDFObject {
     fn file_id(&self) -> String;
-    fn spec_type(&self) -> Option<SpecVer>;
+    fn spec_type(&self) -> SpecVer;
     fn unfinalized_flags_type(&self) -> Option<UnfinalizedFlagsType>;
     fn version(&self) -> u16;
     fn custom_flags(&self) -> u16;
 }
 
 /// Gerneric header block
-pub trait HDObject: CommentObject {
+pub trait HDObject<'a, DG> {
     /// get data group list
-    fn data_groups(&self) -> Option<Vec<BlockId>>;
+    fn data_groups(&self, mdf_file: &'a MDFFile) -> Option<Vec<&'a DG>>;
     /// recording time
-    fn recording_time(&self) -> DateTime<Utc>;
+    fn recording_time(&self) -> Option<DateTime<Utc>>;
 }
 
-pub trait CCObject {
+pub trait CCObject<'a, CC> {
     fn to_physical(&self, value: f64, inversed: bool) -> f64;
+    fn inc_ccblock(&self, mdf_file: &'a MDFFile) -> Option<Vec<&'a CC>>;
 }
 
 #[derive(Debug, Clone)]
@@ -274,15 +272,7 @@ impl DependencyType {
     }
 }
 
-pub trait DataContainer {
-    // fn get_reader(&self, offset: u64,mdf_file: &MDFFile) -> Option<BufReader<File>>;
-    fn read_data(&self, offset: u64, length: u32, mdf_file: &mut MDFFile) -> Vec<u8>;
-}
-
-pub trait DGObject {
-    fn cgblocks(&self) -> Option<Vec<BlockId>>;
-    fn record_id_type(&self) -> Option<RecordIDType>;
-}
+pub trait DGObject {}
 
 pub trait CGObject<'a, CN, DG, SR> {
     fn cnblocks(&self, mdf_file: &'a MDFFile) -> Option<Vec<&'a CN>>;
@@ -298,11 +288,14 @@ pub trait CNObject<'a, CC, CD, CE, CG> {
     fn cdblock(&self, mdf_file: &'a MDFFile) -> Option<&'a CD>;
     fn ceblock(&self, mdf_file: &'a MDFFile) -> Option<&'a CE>;
     fn cgblock(&self, mdf_file: &'a MDFFile) -> Option<&'a CG>;
-    fn max(&self) -> f64;
-    fn max_ex(&self) -> f64;
-    fn min(&self) -> f64;
-    fn min_ex(&self) -> f64;
+    fn max(&self, mdf_file: &'a MDFFile) -> f64;
+    fn max_ex(&self, mdf_file: &'a MDFFile) -> f64;
+    fn min(&self, mdf_file: &'a MDFFile) -> f64;
+    fn min_ex(&self, mdf_file: &'a MDFFile) -> f64;
+    fn unit(&self, mdf_file: &'a MDFFile) -> String;
 }
+
+pub trait SRObject {}
 
 /// Block that can be stored inside internal arena,
 /// When write to MDF file, record block or other data block will be buffered (in vector), and directly write to file.
@@ -387,13 +380,13 @@ impl MDFFile {
         let idblock = v3::IDBlock::parse(&idblock_buf)
             .ok_or_else(|| MDFErrorKind::IDBlockError("Faild to parse id block(v3)".to_string()))?;
 
-        if idblock.file_id != "MDF     " {
+        if idblock.file_id() != "MDF     " {
             return Err(MDFErrorKind::IDBlockError(
                 "File id is not 'MDF     '".to_string(),
             ));
         }
         // if version greater than 400, should parse it as v4::IDBlock;
-        if idblock.version >= 400 {
+        if idblock.version() >= 400 {
             let idblock = v4::IDBlock::parse(&idblock_buf).ok_or_else(|| {
                 MDFErrorKind::IDBlockError("Faild to parse id block(v4)".to_string())
             })?;
@@ -421,7 +414,7 @@ impl MDFFile {
                 .byte_order
                 .map_or(ByteOrder::LittleEndian, |x| x);
             // v3::hdblock
-            v3::HDBlock::parse(byte_order, self);
+            v3::HDBlock::parse(byte_order, self)?;
         } else if self.spec_ver.is_some() {
         } else {
             return Err(MDFErrorKind::VersionError(
@@ -431,7 +424,7 @@ impl MDFFile {
         Ok(())
     }
 
-    fn get_node<T: 'static + PermanentBlock>(&self) -> Option<&T> {
+    pub fn get_node<T: 'static + PermanentBlock>(&self) -> Option<&T> {
         self.id.and_then(|id| {
             id.descendants(&self.arena)
                 .find(|x| self.arena[*x].get().downcast_ref::<T>().is_some())
@@ -440,14 +433,14 @@ impl MDFFile {
     }
 
     /// TODO: delete this method, `BlockId` should not be exposed to outside.
-    fn get_node_id<T: 'static + PermanentBlock>(&self) -> Option<BlockId> {
+    pub fn get_node_id<T: 'static + PermanentBlock>(&self) -> Option<BlockId> {
         self.id.and_then(|id| {
             id.descendants(&self.arena)
                 .find(|x| self.arena[*x].get().downcast_ref::<T>().is_some())
         })
     }
 
-    fn get_nodes<T: 'static + PermanentBlock>(&self) -> Option<Vec<&T>> {
+    pub fn get_all_nodes<T: 'static + PermanentBlock>(&self) -> Option<Vec<&T>> {
         self.id.and_then(|id| {
             Some(
                 id.descendants(&self.arena)
@@ -458,16 +451,28 @@ impl MDFFile {
         })
     }
 
-    fn get_mut_node_by_id<T: 'static + PermanentBlock>(&mut self, id: BlockId) -> Option<&mut T> {
+    pub fn get_nodes_by_parent<T: 'static + PermanentBlock>(&self, id: BlockId) -> Option<Vec<&T>> {
+        Some(
+            id.children(&self.arena)
+                .filter(|x| self.arena[*x].get().downcast_ref::<T>().is_some())
+                .map(|y| self.arena[y].get().downcast_ref::<T>().unwrap())
+                .collect(),
+        )
+    }
+
+    pub fn get_mut_node_by_id<T: 'static + PermanentBlock>(
+        &mut self,
+        id: BlockId,
+    ) -> Option<&mut T> {
         self.arena[id].get_mut().downcast_mut::<T>()
     }
 
-    fn get_node_by_id<T: 'static + PermanentBlock>(&self, id: BlockId) -> Option<&T> {
+    pub fn get_node_by_id<T: 'static + PermanentBlock>(&self, id: BlockId) -> Option<&T> {
         self.arena[id].get().downcast_ref::<T>()
     }
 
     /// TODO: delete this method, `BlockId` should not be exposed to outside.
-    fn get_node_ids<T: 'static + PermanentBlock>(&mut self) -> Option<Vec<BlockId>> {
+    pub fn get_node_ids<T: 'static + PermanentBlock>(&mut self) -> Option<Vec<BlockId>> {
         self.id.and_then(|id| {
             Some(
                 id.descendants(&self.arena)
@@ -477,7 +482,10 @@ impl MDFFile {
         })
     }
 
-    fn get_node_mut_by_name<T: 'static + PermanentBlock>(&mut self, name: &str) -> Option<&mut T> {
+    pub fn get_node_mut_by_name<T: 'static + PermanentBlock>(
+        &mut self,
+        name: &str,
+    ) -> Option<&mut T> {
         self.id.and_then(|id| {
             id.descendants(&self.arena)
                 .find(|x| {
@@ -505,15 +513,15 @@ impl MDFFile {
         parent_id.checked_append(child_id, &mut self.arena).unwrap();
     }
 
-    fn get_channels(&self) -> Vec<BlockId> {
+    pub fn get_channels(&self) -> Vec<BlockId> {
         todo!()
     }
 
-    fn get_channel_groups(&self) -> Vec<BlockId> {
+    pub fn get_channel_groups(&self) -> Vec<BlockId> {
         todo!()
     }
 
-    fn get_master_cnblock(&mut self, cgblock: BlockId) {}
+    pub fn get_master_cnblock(&mut self, cgblock: BlockId) {}
 
     pub fn get_child_node_by_id<T: 'static + PermanentBlock>(&self, id: BlockId) -> Option<&T> {
         id.children(&self.arena)
@@ -576,6 +584,7 @@ impl MDFFile {
         }
     }
 
+    /// get data from raw bytes of an record
     fn get_format_value_by_array(
         &mut self,
         format: ValueFormat,
@@ -693,12 +702,13 @@ impl MDFFile {
         }
         // convert result to physical type
         if format == ValueFormat::Physical {
-            result = self.get_format_value_by_f64(cn_block, result, inversed);
+            result = self.get_phys_value_by_f64(cn_block, result, inversed);
         }
         result
     }
 
-    fn get_format_value_by_f64(&mut self, cn_block: BlockId, data: f64, inversed: bool) -> f64 {
+    /// get physical value of a data
+    fn get_phys_value_by_f64(&mut self, cn_block: BlockId, data: f64, inversed: bool) -> f64 {
         let mut result = data;
         if self.spec_ver.is_some() && *self.spec_ver.as_ref().unwrap() == SpecVer::V3 {
             let cn_block = self.get_node_by_id::<v3::CNBlock>(cn_block).unwrap();
@@ -706,10 +716,10 @@ impl MDFFile {
                 .ccblock(self)
                 .map_or(data, |cc| cc.to_physical(result, inversed));
         }
-
         result
     }
 
+    /// read data from internal file handler with provided start, offset and length
     fn read_data(&mut self, start: u64, offset: u64, length: u32) -> Vec<u8> {
         let loc = start + offset;
         let mut result = vec![0; length as usize];
@@ -777,28 +787,21 @@ mod tests {
         // downcast id block
         let x = file.arena[id].get().downcast_ref::<v3::IDBlock>().unwrap();
         println!("{:?}", x);
-        assert_eq!(x.file_id, "MDF     ");
-        assert_eq!(x.version, 300);
-        // test node edit
-        let id_ref_mut = file.get_mut_node_by_id::<v3::IDBlock>(id).unwrap();
-        (*id_ref_mut).version = 400;
-        assert_eq!(id_ref_mut.version, 400);
-        let id_ref_mut2 = file.get_mut_node_by_id::<v3::IDBlock>(id).unwrap();
-        (*id_ref_mut2).version = 300;
-        assert_eq!(id_ref_mut2.version, 300);
+        assert_eq!(x.file_id(), "MDF     ");
+        assert_eq!(x.version(), 300);
         // write val to file
         let mut handle = OpenOptions::new()
             .write(true)
             .create(true)
             .open("./test_result.txt")
             .unwrap();
-        let mut iter = file.get_node_ids::<v3::CNBlock>().unwrap().into_iter();
-        let x: Vec<f64> = iter
+        let iter = file.get_node_ids::<v3::CNBlock>().unwrap().into_iter();
+        let _x: Vec<f64> = iter
             .map(|node_id| {
                 let temp = file.get_data_cnblock(ValueFormat::Physical, node_id, 0);
                 let name = file.get_node_by_id::<v3::CNBlock>(node_id).unwrap().name();
                 println!("({name},{temp})");
-                write!(handle, "{},{}\n", name, temp);
+                write!(handle, "{},{}\n", name, temp).unwrap();
                 temp
             })
             .collect();
@@ -819,8 +822,8 @@ mod tests {
         // downcast id block
         let x = file.arena[id].get().downcast_ref::<v4::IDBlock>().unwrap();
         println!("{:?}", x);
-        assert_eq!(x.file_id, "MDF     ");
-        assert_eq!(x.version, 410);
+        assert_eq!(x.file_id(), "MDF     ");
+        assert_eq!(x.version(), 410);
     }
 
     #[test]

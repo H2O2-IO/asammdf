@@ -1,36 +1,30 @@
 use std::collections::HashMap;
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
-use std::result;
-use std::sync::mpsc::channel;
 
 use asammdf_derive::{
     basic_object, channel_group_object, channel_object, comment_object, data_group_object,
-    header_object, id_object, mdf_object, normal_object,
+    id_object, mdf_object, normal_object,
 };
+
 use asammdf_derive::{IDObject, MDFObject, PermanentBlock};
-use chrono::Local;
-use indextree::Arena;
-use itertools::Itertools;
-use nom::InputLength;
+use chrono::{DateTime, Local, TimeZone, Utc};
 
 use self::parser::{
     cc_block_basic, cdblock_basic, ce_block_basic, cg_block_basic, cn_block_basic, dependency_type,
     dg_block_basic, header_block_basic, parse_datetype, parse_dim_type, parse_timetype,
-    read_le_i16, read_le_u16, read_le_u32, read_le_u64, read_n_le_f64, read_str, sr_block_basic,
-    tr_block_basic, trigger_evt, tx_block_basic, vector_can_type,
+    sr_block_basic, tr_block_basic, trigger_evt, tx_block_basic, vector_can_type,
+};
+use crate::misc::helper::{
+    read_le_i16, read_le_u16, read_le_u32, read_le_u64, read_n_le_f64, read_str,
+};
+use crate::misc::{transform_params, PARAM_LINEAR_ARRAY_I, RATIONAL_PARAM_ARRAY_I};
+use crate::{
+    BlockId, ByteOrder, CCObject, CGObject, CNObject, ChannelType, ConversionType, DGObject,
+    DependencyType, HDObject, IDObject, MDFErrorKind, MDFFile, MDFObject, PermanentBlock,
+    RecordIDType, SRObject, SignalType, SpecVer, SyncType, TimeQualityType, UnfinalizedFlagsType,
 };
 
-use super::SpecVer;
-use super::UnfinalizedFlagsType;
-use crate::misc::{param_linear_array_i, rational_param_array_i, transform_params};
-use crate::{
-    BlockId, CCObject, CGObject, CNObject, DataContainer, IDObject, MDFErrorKind, MDFFile,
-};
-use crate::{ByteOrder, ChannelType, RecordIDType, SignalType, SyncType, TimeQualityType};
-use crate::{ConversionType, MDFObject};
-use crate::{DateTime, Utc};
-use crate::{DependencyType, PermanentBlock};
 mod parser;
 
 macro_rules! enum_u32_convert {
@@ -41,7 +35,6 @@ macro_rules! enum_u32_convert {
         $vis enum $name {
             $($(#[$vmeta])* $vname $(= $val)?,)*
         }
-
         impl std::convert::TryFrom<u32> for $name {
             type Error = ();
 
@@ -78,7 +71,7 @@ enum_u32_convert! {
 pub struct IDBlock {
     pub byte_order: Option<ByteOrder>,
     pub code_page: u16,
-    pub format_id: String,
+    format_id: String,
     pub float_point_format: Option<FloatPointFormat>,
     pub program_id: String,
 }
@@ -86,7 +79,7 @@ pub struct IDBlock {
 impl IDBlock {
     /// Create a v3::IDBlock with version default to `330`, spec_type default to `SpecVer::V3`
     /// and float_point_format default to `FloatPointFormat::IEEE754`
-    fn new(program_id: String, code_page: u16) -> IDBlock {
+    pub fn new(program_id: String, code_page: u16) -> IDBlock {
         IDBlock {
             byte_order: None,
             code_page,
@@ -96,12 +89,16 @@ impl IDBlock {
             block_size: 64,
             name: "ID".to_string(),
             file_id: "MDF     ".to_string(),
-            spec_type: Some(SpecVer::V3),
+            spec_type: SpecVer::V3,
             unfinalized_flags: None,
             version: 330,
             custom_flags: 0,
             block_id: None,
         }
+    }
+    /// get `format_id` of IDBlock
+    pub fn format_id(&self) -> String {
+        self.format_id.to_string()
     }
 
     /// parse a IDBlock from a 64byte u8 slice
@@ -111,7 +108,6 @@ impl IDBlock {
 }
 
 #[comment_object]
-#[header_object]
 #[normal_object]
 #[basic_object]
 #[derive(Debug, Clone, PermanentBlock)]
@@ -128,9 +124,9 @@ pub struct HDBlock {
     pub timestamp: Option<u64>,
     pub utc_offset: Option<i16>,
 
-    link_first_file_group: u32,
-    link_file_comment_txt: u32,
-    link_program_block: u32,
+    pub(crate) link_first_file_group: u32,
+    pub(crate) link_file_comment_txt: u32,
+    pub(crate) link_program_block: u32,
 }
 
 impl MDFObject for HDBlock {
@@ -166,7 +162,6 @@ impl HDBlock {
             block_id: None,
         }
     }
-
     pub(crate) fn parse(byte_order: ByteOrder, instance: &mut MDFFile) -> Result<(), MDFErrorKind> {
         // get file handler out
         // when id block parsed, position of file handler inside MDFFile is 64.
@@ -211,14 +206,12 @@ impl HDBlock {
         hd_block.comment = comment_block
             .as_ref()
             .map_or(Default::default(), |x| x.text.clone());
-        let comment_id = comment_block.map(|x| instance.arena.new_node(Box::new(x)));
         // read program specific data
         println!("{program_block_link}");
         let program_block = TXBlock::parse(instance, program_block_link);
         hd_block.program_specific_data = program_block
             .as_ref()
             .map_or(Default::default(), |x| x.text.clone());
-        let program_block_id = program_block.map(|x| instance.arena.new_node(Box::new(x)));
 
         let hd_id = instance.arena.new_node(Box::new(hd_block));
         // add hd_block as id_block child
@@ -228,29 +221,37 @@ impl HDBlock {
             .unwrap()
             .block_id = Some(id_id);
         id_id.checked_append(hd_id, &mut instance.arena).unwrap();
-        // add comment and program specific data as child
-        comment_id.map(|node_id| {
-            hd_id.checked_append(node_id, &mut instance.arena).unwrap();
-        });
-        program_block_id.map(|node_id| {
-            hd_id.checked_append(node_id, &mut instance.arena).unwrap();
-        });
         // process date group block
         while group_id > 0 {
             group_id = DGBlock::parse(byte_order, hd_id, group_id, instance).unwrap();
         }
-        // debug
-        // get data channels number
-        println!(
-            "channel number: {:?}",
-            instance.get_nodes::<CNBlock>().unwrap().len()
-        );
-        // get channel channels number
-        println!(
-            "channel group number: {:?}",
-            instance.get_nodes::<CGBlock>().unwrap().len()
-        );
         Ok(())
+    }
+}
+
+/// trait alias for specific `HDObject` trait
+trait HDObjectV3<'a>: HDObject<'a, DGBlock> {}
+
+impl<'a> HDObjectV3<'a> for HDBlock {}
+
+impl<'a> HDObject<'a, DGBlock> for HDBlock {
+    /// get data groups contained inside this file
+    fn data_groups(&self, mdf_file: &'a MDFFile) -> Option<Vec<&'a DGBlock>> {
+        let id = self.block_id.clone();
+        id.map_or(None, |node_id| {
+            mdf_file.get_nodes_by_parent::<DGBlock>(node_id)
+        })
+    }
+    /// get the recording time of the file
+    fn recording_time(&self) -> Option<DateTime<Utc>> {
+        self.timestamp.map_or_else(
+            || {
+                let time_str = self.date.clone() + " " + &self.time;
+                Utc.datetime_from_str(&time_str, "%d:%m:%Y %H:%M:%S")
+                    .map_or(None, |time| Some(time))
+            },
+            |nanos| Some(Utc.timestamp_nanos(nanos as i64)),
+        )
     }
 }
 
@@ -276,6 +277,8 @@ impl MDFObject for DGBlock {
         "Data group".to_string()
     }
 }
+
+impl DGObject for DGBlock {}
 
 impl DGBlock {
     pub fn new() -> DGBlock {
@@ -341,10 +344,10 @@ impl DGBlock {
 #[derive(Debug, Clone, PermanentBlock)]
 pub struct CGBlock {
     pub record_id: u16,
-    link_cg_comment: u32,
-    link_first_cnblock: u32,
-    link_first_srblock: u32,
-    link_next_cgblock: u32,
+    pub(crate) link_cg_comment: u32,
+    pub(crate) link_first_cnblock: u32,
+    pub(crate) link_first_srblock: u32,
+    pub(crate) link_next_cgblock: u32,
 }
 
 impl MDFObject for CGBlock {
@@ -400,19 +403,16 @@ impl CGBlock {
         cg_block.comment = comment_block
             .as_ref()
             .map_or(Default::default(), |x| x.text.clone());
-        let comment_id = comment_block.map(|x| instance.arena.new_node(Box::new(x)));
         // save block to arena
         let cg_id = instance.arena.new_node(Box::new(cg_block));
         instance
             .get_mut_node_by_id::<CGBlock>(cg_id)
             .unwrap()
             .block_id = Some(cg_id);
-        comment_id.map(|node_id| cg_id.checked_append(node_id, &mut instance.arena));
         instance.link_id_blocks.insert(link_id, cg_id);
         parent_id
             .checked_append(cg_id, &mut instance.arena)
             .unwrap();
-
         // parse channel blocks
         let mut cn_link = cn_link as u64;
         while cn_link > 0 {
@@ -428,22 +428,34 @@ impl CGBlock {
     }
 }
 
-impl<'a> CGObject<'a, CNBlock, DGBlock, SRBlock> for CGBlock {
-    fn cnblocks(&self, mdf_file: &'a MDFFile) -> Option<Vec<&'a CNBlock>> {
-        todo!()
-    }
+/// trait alias for specific `CGObject` trait
+trait CGObjectV3<'a>: CGObject<'a, CNBlock, DGBlock, SRBlock> {}
 
+impl<'a> CGObjectV3<'a> for CGBlock {}
+
+impl<'a> CGObject<'a, CNBlock, DGBlock, SRBlock> for CGBlock {
+    /// get child channel blocks of this channel group block
+    fn cnblocks(&self, mdf_file: &'a MDFFile) -> Option<Vec<&'a CNBlock>> {
+        let id = self.block_id.clone();
+        id.map_or(None, |node_id| {
+            mdf_file.get_nodes_by_parent::<CNBlock>(node_id)
+        })
+    }
+    // get parent data group block
     fn dgblock(&self, mdf_file: &'a MDFFile) -> Option<&'a DGBlock> {
         let id = self.block_id.clone();
         id.map_or(None, |node_id| {
             mdf_file.get_ancestor_node_by_id::<DGBlock>(node_id)
         })
     }
-
+    /// get child srblocks of this channel group block
     fn srblocks(&self, mdf_file: &'a MDFFile) -> Option<Vec<&'a SRBlock>> {
-        todo!()
+        let id = self.block_id.clone();
+        id.map_or(None, |node_id| {
+            mdf_file.get_nodes_by_parent::<SRBlock>(node_id)
+        })
     }
-
+    /// get total record size of this channel group
     fn get_record_size(&self, mdf_file: &'a MDFFile) -> i64 {
         let mut size = self.record_size;
         let record_id_type = self.dgblock(mdf_file).unwrap().record_id_type;
@@ -480,13 +492,13 @@ pub struct CNBlock {
     pub long_name: String,
     pub rate: f64,
     pub name: String,
-    link_ccblock: u32,
-    link_cdblock: u32,
-    link_ceblock: u32,
-    link_channel_comment: u32,
-    link_mcd_unique_name: u32,
-    link_next_cnblock: u32,
-    link_signal_display_identifier: u32,
+    pub(crate) link_ccblock: u32,
+    pub(crate) link_cdblock: u32,
+    pub(crate) link_ceblock: u32,
+    pub(crate) link_channel_comment: u32,
+    pub(crate) link_mcd_unique_name: u32,
+    pub(crate) link_next_cnblock: u32,
+    pub(crate) link_signal_display_identifier: u32,
 }
 
 impl MDFObject for CNBlock {
@@ -528,11 +540,10 @@ impl CNBlock {
             id: "CN".to_string(),
             block_size: 228,
             add_offset,
-            bitmask_cache: 0,
             bit_offset: bit_offset as u16,
             channel_type: Some(channel_type),
-            max_raw: 0.0,
-            min_raw: 0.0,
+            max_raw: f64::NAN,
+            min_raw: f64::NAN,
             bits_count,
             signal_type: Some(signal_type),
             sync_type: None,
@@ -576,39 +587,35 @@ impl CNBlock {
         cn_block.comment = comment_block
             .as_ref()
             .map_or(Default::default(), |x| x.text.clone());
-        let comment_id = comment_block.map(|x| instance.arena.new_node(Box::new(x)));
         // parse longname
         let longname_block = TXBlock::parse(instance, cn_block.link_mcd_unique_name as u64);
         cn_block.long_name = longname_block
             .as_ref()
             .map_or(Default::default(), |x| x.text.clone());
-        let longnam_id = longname_block.map(|x| instance.arena.new_node(Box::new(x)));
         // parse display name
         let displayname_block =
             TXBlock::parse(instance, cn_block.link_signal_display_identifier as u64);
         cn_block.display_name = displayname_block
             .as_ref()
             .map_or(Default::default(), |x| x.text.clone());
-        let displayname_id = displayname_block.map(|x| instance.arena.new_node(Box::new(x)));
-
+        // store link before store to arena for convenience
         let link_ccblock = cn_block.link_ccblock;
         let link_ceblock = cn_block.link_ceblock;
         let link_cdblock = cn_block.link_cdblock;
         let cn_id = instance.arena.new_node(Box::new(cn_block));
-
         // parse ccblock
         if link_ccblock > 0 {
-            let node_id = CCBlock::parse(byte_order, cn_id, link_ccblock as u64, instance)?;
+            CCBlock::parse(byte_order, cn_id, link_ccblock as u64, instance)?;
         }
         // parse ceblock
         if link_ceblock > 0 {
-            let node_id = CEBlock::parse(byte_order, cn_id, link_ceblock as u64, instance)?;
+            CEBlock::parse(byte_order, cn_id, link_ceblock as u64, instance)?;
         }
         // parse cdblock
         if link_cdblock > 0 {
-            let node_id = CDBlock::parse(byte_order, cn_id, link_cdblock as u64, instance);
+            CDBlock::parse(byte_order, cn_id, link_cdblock as u64, instance)?;
         }
-        // save id to self
+        // save id to self, append self to parent and restore file stream position
         instance
             .get_mut_node_by_id::<CNBlock>(cn_id)
             .unwrap()
@@ -617,7 +624,6 @@ impl CNBlock {
             .checked_append(cn_id, &mut instance.arena)
             .unwrap();
         buf_reader.seek(SeekFrom::Start(pos)).unwrap();
-        // println!("CNBlock:{:?}",instance.get_node_by_id::<CNBlock>(cc_id));
         Ok(result)
     }
 }
@@ -675,20 +681,25 @@ impl<'a> CNObject<'a, CCBlock, CDBlock, CEBlock, CGBlock> for CNBlock {
         })
     }
 
-    fn max(&self) -> f64 {
-        todo!()
+    fn max(&self, mdf_file: &'a MDFFile) -> f64 {
+        self.ccblock(mdf_file).map_or(f64::NAN, |x| x.max)
     }
 
-    fn max_ex(&self) -> f64 {
-        todo!()
+    fn max_ex(&self, mdf_file: &'a MDFFile) -> f64 {
+        self.max(mdf_file)
     }
 
-    fn min(&self) -> f64 {
-        todo!()
+    fn min(&self, mdf_file: &'a MDFFile) -> f64 {
+        self.ccblock(mdf_file).map_or(f64::NAN, |x| x.min)
     }
 
-    fn min_ex(&self) -> f64 {
-        todo!()
+    fn min_ex(&self, mdf_file: &'a MDFFile) -> f64 {
+        self.min(mdf_file)
+    }
+
+    fn unit(&self, mdf_file: &'a MDFFile) -> String {
+        self.ccblock(mdf_file)
+            .map_or(Default::default(), |x| x.unit.clone())
     }
 }
 
@@ -699,8 +710,8 @@ pub struct SRBlock {
     pub time_interval_len: f64,
     /// Number of reduced samples
     pub reduced_samples_number: u64,
-    link_data_block: u32,
-    link_next_sr: u32,
+    pub(crate) link_data_block: u32,
+    pub(crate) link_next_sr: u32,
 }
 
 impl MDFObject for SRBlock {
@@ -726,7 +737,7 @@ impl SRBlock {
     }
 
     pub(crate) fn parse(
-        byte_order: ByteOrder,
+        _byte_order: ByteOrder,
         parent_id: BlockId,
         link_id: u64,
         instance: &mut MDFFile,
@@ -736,9 +747,8 @@ impl SRBlock {
         buf_reader.seek(SeekFrom::Start(link_id)).unwrap();
         let mut buf = [0; 24];
         buf_reader.read_exact(&mut buf).unwrap();
-        let mut sr_block = sr_block_basic(&buf).unwrap().1;
+        let sr_block = sr_block_basic(&buf).unwrap().1;
         let result = sr_block.link_next_sr as u64;
-        println!("{:?}", sr_block);
         let sr_id = instance.arena.new_node(Box::new(sr_block));
         parent_id
             .checked_append(sr_id, &mut instance.arena)
@@ -747,6 +757,8 @@ impl SRBlock {
         Ok(result)
     }
 }
+
+impl SRObject for SRBlock {}
 
 #[normal_object]
 #[comment_object]
@@ -813,8 +825,6 @@ impl CCBlock {
         let mut buf = [0; 46];
         buf_reader.read_exact(&mut buf).unwrap();
         let mut cc_block = cc_block_basic(&buf, byte_order).unwrap().1;
-        // println!("{:?}", x.display_name);
-        // println!("{:?}|{:?}", cc_block.conversion_type, cc_block.tab_size);
         let pos_pos = buf_reader.stream_position().unwrap();
         cc_block.parse_params(pos_pos, instance)?;
         let cc_id = instance.arena.new_node(Box::new(cc_block));
@@ -827,7 +837,6 @@ impl CCBlock {
 
     fn parse_params(&mut self, position: u64, instance: &mut MDFFile) -> Result<(), MDFErrorKind> {
         let mut buf_reader = instance.get_buf_reader().unwrap();
-        let pos = buf_reader.stream_position().unwrap();
         buf_reader.seek(SeekFrom::Start(position)).unwrap();
         match self.conversion_type {
             Some(conv_type) => {
@@ -873,7 +882,6 @@ impl CCBlock {
                             text_table_pairs.push((key[0], value));
                         }
                         self.text_table_pairs = Some(text_table_pairs);
-                        // println!("text_table_pairs:{:?}",self.text_table_pairs);
                     }
                     ConversionType::TextRange => {
                         let mut text_range_pairs = HashMap::new();
@@ -887,8 +895,6 @@ impl CCBlock {
                         self.comment = default_text_block
                             .as_ref()
                             .map_or(Default::default(), |x| x.text.clone());
-                        let comment_id =
-                            default_text_block.map(|x| instance.arena.new_node(Box::new(x)));
 
                         for _ in 0..(self.tab_size - 1) {
                             let mut buf = vec![0; 2 * 8];
@@ -906,24 +912,20 @@ impl CCBlock {
                             let text = text_block
                                 .as_ref()
                                 .map_or(Default::default(), |x| x.text.clone());
-                            let text_id = text_block.map(|x| instance.arena.new_node(Box::new(x)));
 
                             text_range_pairs.insert(text, range);
                         }
                         self.text_range_pairs = Some(text_range_pairs);
-                        // println!("text_range_pairs:{:?}",self.text_range_pairs);
                     }
                     ConversionType::Date => {
                         let mut buf = [0; 7];
                         buf_reader.read_exact(&mut buf).unwrap();
                         self.date = Some(parse_datetype(&buf).unwrap().1);
-                        // println!("date:{:?}",self.date);
                     }
                     ConversionType::Time => {
                         let mut buf = [0; 5];
                         buf_reader.read_exact(&mut buf).unwrap();
                         self.time = Some(parse_timetype(&buf).unwrap().1);
-                        // println!("time:{:?}",self.time);
                     }
                     _ => {
                         return Err(MDFErrorKind::CCBlockError(
@@ -938,14 +940,19 @@ impl CCBlock {
     }
 }
 
-impl CCObject for CCBlock {
+/// trait alias for specific `CCObject` trait
+trait CCObjectV3<'a>: CCObject<'a, CCBlock> {}
+
+impl<'a> CCObjectV3<'a> for CCBlock {}
+
+impl<'a> CCObject<'a, CCBlock> for CCBlock {
     fn to_physical(&self, value: f64, inversed: bool) -> f64 {
         let mut value = value;
         let conv_type = self.conversion_type;
         match conv_type {
             Some(ConversionType::ParametricLinear) => {
                 if self.params.is_some()
-                    && !itertools::equal(self.params.as_ref().unwrap(), &param_linear_array_i)
+                    && !itertools::equal(self.params.as_ref().unwrap(), &PARAM_LINEAR_ARRAY_I)
                 {
                     value = self.params.as_ref().unwrap()[1] * (value)
                         + self.params.as_ref().unwrap()[0];
@@ -956,7 +963,7 @@ impl CCObject for CCBlock {
                 if self.tab_pairs.is_some() && self.tab_pairs.as_ref().unwrap().len() > 0 {
                     let tab_pairs = self.tab_pairs.as_ref().unwrap();
                     let len = tab_pairs.len();
-                    let mut value_key = value;
+                    let mut value_key;
 
                     (value_key, value_val) = tab_pairs[0];
 
@@ -1023,7 +1030,7 @@ impl CCObject for CCBlock {
             }
             Some(ConversionType::Rational) => {
                 if self.params.is_some()
-                    && !itertools::equal(self.params.as_ref().unwrap(), &rational_param_array_i)
+                    && !itertools::equal(self.params.as_ref().unwrap(), &RATIONAL_PARAM_ARRAY_I)
                 {
                     let params = self.params.as_ref().unwrap().clone();
                     let params = if inversed {
@@ -1045,6 +1052,10 @@ impl CCObject for CCBlock {
         }
 
         value
+    }
+
+    fn inc_ccblock(&self, _mdf_file: &'a MDFFile) -> Option<Vec<&'a CCBlock>> {
+        None
     }
 }
 
@@ -1132,7 +1143,7 @@ impl CEBlock {
     }
 
     pub(crate) fn parse(
-        byte_order: ByteOrder,
+        _byte_order: ByteOrder,
         parent_id: BlockId,
         link_id: u64,
         instance: &mut MDFFile,
@@ -1155,9 +1166,7 @@ impl CEBlock {
                 buf_reader.read_exact(&mut buf).unwrap();
                 ce_block.vector_can = Some(vector_can_type(&buf).unwrap().1);
             }
-            None => {
-                //return Err(MDFErrorKind::CEBlockError("Extension type not supported!".into()));
-            }
+            None => {}
         }
 
         let ce_id = instance.arena.new_node(Box::new(ce_block));
@@ -1218,7 +1227,7 @@ impl CDBlock {
     }
 
     pub(crate) fn parse(
-        byte_order: ByteOrder,
+        _byte_order: ByteOrder,
         parent_id: BlockId,
         link_id: u64,
         instance: &mut MDFFile,
@@ -1228,7 +1237,7 @@ impl CDBlock {
         buf_reader.seek(SeekFrom::Start(link_id)).unwrap();
         let mut buf = [0; 8];
         buf_reader.read_exact(&mut buf).unwrap();
-        let (dependency_number, mut cd_block) = cdblock_basic(&buf).unwrap().1;
+        let (dependency_number, cd_block) = cdblock_basic(&buf).unwrap().1;
         let mut dependencies = Vec::new();
         for _ in 0..dependency_number {
             let mut buf = [0; 12];
@@ -1268,7 +1277,7 @@ impl VectorCANType {
 #[derive(Debug, Clone, PermanentBlock)]
 pub struct TRBlock {
     pub trigger_events: Vec<TriggerEvent>,
-    pub link_comment: u32,
+    pub(crate) link_comment: u32,
 }
 
 impl MDFObject for TRBlock {
@@ -1293,7 +1302,7 @@ impl TRBlock {
     }
 
     pub(crate) fn parse(
-        byte_order: ByteOrder,
+        _byte_order: ByteOrder,
         parent_id: BlockId,
         link_id: u64,
         instance: &mut MDFFile,
@@ -1315,16 +1324,12 @@ impl TRBlock {
         tr_block.comment = comment_block
             .as_ref()
             .map_or(Default::default(), |x| x.text.clone());
-        let comment_id = comment_block.map(|x| instance.arena.new_node(Box::new(x)));
         // save tr block to arena
         let tr_id = instance.arena.new_node(Box::new(tr_block));
-        comment_id.map(|node_id| tr_id.checked_append(node_id, &mut instance.arena));
         parent_id
             .checked_append(tr_id, &mut instance.arena)
             .unwrap();
-
         buf_reader.seek(SeekFrom::Start(pos)).unwrap();
-
         Ok(tr_id)
     }
 }
@@ -1351,10 +1356,12 @@ impl TriggerEvent {
 /// take care that block_size of this type may not equal to len(self.text) + 4 + 1,
 /// leading and trailing `\0` in self.text will be trimed.
 /// when writing to disk, block_size will be calculatd directly from self.text (self.text + 4 + 1).
+///
+/// For convenience when writing, currently, we only store TXBlock as a String, not as child of parent block.
 #[normal_object]
 #[derive(Debug, Clone, PermanentBlock)]
 pub struct TXBlock {
-    /// a string with a eol(`\0`) char, block size include eol char.
+    /// a string with a eol(`\0`) char, block size include this eol char.
     pub text: String,
 }
 

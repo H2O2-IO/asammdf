@@ -4,18 +4,19 @@ use super::{
     CCBlock, CDBlock, CEBlock, CGBlock, CNBlock, DGBlock, DateType, DimType, HDBlock, IDBlock,
     SRBlock, TRBlock, TXBlock, TimeType, TriggerEvent, VectorCANType,
 };
-use chrono::{DateTime, Local};
+use chrono::Local;
 use nom::bytes::complete::take;
-use nom::multi::count;
-use nom::number::complete::{le_f64, le_i16, le_u16, le_u32, le_u64, le_u8};
+use nom::number::complete::{le_f64, le_u16, le_u32, le_u8};
 use nom::sequence::tuple;
 use nom::IResult;
 
+/// Basic parser that parse id & blocksize of MDFv3 Block Objects
 pub(crate) fn block_base_v3(input: &[u8]) -> IResult<&[u8], (&[u8], u16)> {
     let (input, (id, block_size)) = tuple((take(2u32), le_u16))(input)?;
     Ok((input, (id, block_size)))
 }
 
+/// IDBlock parser, fix length(46bytes)
 pub(crate) fn id_block(input: &[u8]) -> IResult<&[u8], IDBlock> {
     let (
         input,
@@ -72,7 +73,7 @@ pub(crate) fn id_block(input: &[u8]) -> IResult<&[u8], IDBlock> {
     Ok((input, idblock))
 }
 
-/// basic info(164bytes)
+/// HDBlcok basic parser, basic info with fix length(164bytes)
 pub(crate) fn header_block_basic(input: &[u8]) -> IResult<&[u8], HDBlock> {
     let (
         input,
@@ -131,7 +132,7 @@ pub(crate) fn header_block_basic(input: &[u8]) -> IResult<&[u8], HDBlock> {
     Ok((input, header_block))
 }
 
-/// trblock basic info(10bytes)
+/// TRBlock basic parser, basic info with fix length(10bytes)
 pub(crate) fn tr_block_basic(input: &[u8]) -> IResult<&[u8], (TRBlock, u16)> {
     let (input, ((id, block_size), link_comment, trigger_event_number)) =
         tuple((block_base_v3, le_u32, le_u16))(input)?;
@@ -143,7 +144,7 @@ pub(crate) fn tr_block_basic(input: &[u8]) -> IResult<&[u8], (TRBlock, u16)> {
     Ok((input, (tr_block, trigger_event_number)))
 }
 
-/// srblock basic info(24bytes)
+/// SRBlock basic parser, basic info with fix length(24bytes)
 pub(crate) fn sr_block_basic(input: &[u8]) -> IResult<&[u8], SRBlock> {
     let (
         input,
@@ -160,18 +161,21 @@ pub(crate) fn sr_block_basic(input: &[u8]) -> IResult<&[u8], SRBlock> {
     sr_block.block_size = block_size as _;
     sr_block.link_next_sr = link_next_sr;
     sr_block.link_data_block = link_data_block;
+    sr_block.reduced_samples_number = reduced_samples_number as u64;
+    sr_block.time_interval_len = time_interval_len;
 
     Ok((input, sr_block))
 }
 
+/// TriggerEvent(belong to TRBlock) parser, fix length(24bytes)
 pub(crate) fn trigger_evt(input: &[u8]) -> IResult<&[u8], TriggerEvent> {
     let (input, (time, pre_time, post_time)) = tuple((le_f64, le_f64, le_f64))(input)?;
 
-    let mut trig_evt = TriggerEvent::new(time, pre_time, post_time);
+    let trig_evt = TriggerEvent::new(time, pre_time, post_time);
     Ok((input, trig_evt))
 }
 
-/// datetype info(7bytes)
+/// DateType(belong to CCBlock) parser, fix length((7bytes)
 pub(crate) fn parse_datetype(input: &[u8]) -> IResult<&[u8], DateType> {
     let (input, (ms, minute, hour, day, month, year)) =
         tuple((le_u16, le_u8, le_u8, le_u8, le_u8, le_u8))(input)?;
@@ -179,14 +183,14 @@ pub(crate) fn parse_datetype(input: &[u8]) -> IResult<&[u8], DateType> {
     Ok((input, date))
 }
 
-/// datetype info(7bytes)
+/// TimeType(belong to CCBlock) parser, fix length((5bytes)
 pub(crate) fn parse_timetype(input: &[u8]) -> IResult<&[u8], TimeType> {
     let (input, (ms, day)) = tuple((le_u32, le_u8))(input)?;
     Ok((input, TimeType::new(ms, day)))
 }
 
-/// ccblock basic info(46bytes)
-pub(crate) fn cc_block_basic(input: &[u8], byte_order: ByteOrder) -> IResult<&[u8], CCBlock> {
+/// CCBlock basic parser, basic info with fix length(46bytes)
+pub(crate) fn cc_block_basic(input: &[u8], _byte_order: ByteOrder) -> IResult<&[u8], CCBlock> {
     let (input, ((id, block_size), bounded, min, max, unit, conversion_type, tab_size)) =
         tuple((
             block_base_v3,
@@ -197,8 +201,11 @@ pub(crate) fn cc_block_basic(input: &[u8], byte_order: ByteOrder) -> IResult<&[u
             le_u16,
             le_u16,
         ))(input)?;
-    let max = if bounded > 0 { max } else { f64::NAN };
-    let min = if bounded < 0 { min } else { f64::NAN };
+    let (max, min) = if bounded > 0 {
+        (max, min)
+    } else {
+        (f64::NAN, f64::NAN)
+    };
     let conversion_type = (conversion_type as u32)
         .try_into()
         .map_or(None, |x| Some(x));
@@ -210,7 +217,7 @@ pub(crate) fn cc_block_basic(input: &[u8], byte_order: ByteOrder) -> IResult<&[u
     Ok((input, cc_block))
 }
 
-/// ceblock basic info(6bytes)
+/// CEBlock basic parser, basic info with fix length(6bytes)
 pub(crate) fn ce_block_basic(input: &[u8]) -> IResult<&[u8], CEBlock> {
     let (input, ((id, block_size), ext_type)) = tuple((block_base_v3, le_u16))(input)?;
     let mut ce_block = CEBlock::new();
@@ -221,7 +228,7 @@ pub(crate) fn ce_block_basic(input: &[u8]) -> IResult<&[u8], CEBlock> {
     Ok((input, ce_block))
 }
 
-/// dim type(118 bytes)
+/// DimType(belong to CEBlock) parser, fix length(118 bytes)
 pub(crate) fn parse_dim_type(input: &[u8]) -> IResult<&[u8], DimType> {
     let (input, (module, address, description, ecuid)) =
         tuple((le_u16, le_u32, take(80u32), take(32u32)))(input)?;
@@ -234,7 +241,7 @@ pub(crate) fn parse_dim_type(input: &[u8]) -> IResult<&[u8], DimType> {
     Ok((input, DimType::new(module, address, description, ecuid)))
 }
 
-/// vector can type(80bytes)
+/// VectorCANType(belong to CEBlock) parser, fix length(80bytes)
 pub(crate) fn vector_can_type(input: &[u8]) -> IResult<&[u8], VectorCANType> {
     let (input, (id, index, message, sender)) =
         tuple((le_u32, le_u32, take(36u32), take(36u32)))(input)?;
@@ -247,7 +254,7 @@ pub(crate) fn vector_can_type(input: &[u8]) -> IResult<&[u8], VectorCANType> {
     Ok((input, VectorCANType::new(id, index, message, sender)))
 }
 
-// cdblock basic(8bytes)
+/// CDBlock basic parser, basic info with fix length(8bytes)
 pub(crate) fn cdblock_basic(input: &[u8]) -> IResult<&[u8], (u16, CDBlock)> {
     let (input, ((id, block_size), dependency_type, dependency_number)) =
         tuple((block_base_v3, le_u16, le_u16))(input)?;
@@ -260,7 +267,7 @@ pub(crate) fn cdblock_basic(input: &[u8]) -> IResult<&[u8], (u16, CDBlock)> {
     Ok((input, (dependency_number, cd_block)))
 }
 
-// dependency type(12bytes)
+/// DependencyType(belong to CDBlock) parser, fix length(12bytes)
 pub(crate) fn dependency_type(input: &[u8]) -> IResult<&[u8], DependencyType> {
     let (input, (link_dg, link_cg, link_cn)) = tuple((le_u32, le_u32, le_u32))(input)?;
 
@@ -270,7 +277,7 @@ pub(crate) fn dependency_type(input: &[u8]) -> IResult<&[u8], DependencyType> {
     ))
 }
 
-/// cnblock basic info(218bytes)
+/// CNBlock basic parser, basic info with fix length(218bytes)
 pub(crate) fn cn_block_basic(input: &[u8], byte_order: ByteOrder) -> IResult<&[u8], CNBlock> {
     let (
         input,
@@ -350,7 +357,7 @@ pub(crate) fn cn_block_basic(input: &[u8], byte_order: ByteOrder) -> IResult<&[u
     Ok((input, cn_block))
 }
 
-/// cgblock basic info(26bytes)
+/// CGBlock basic parser, basic info with fix length(26bytes)
 pub(crate) fn cg_block_basic(input: &[u8]) -> IResult<&[u8], CGBlock> {
     let (
         input,
@@ -388,7 +395,7 @@ pub(crate) fn cg_block_basic(input: &[u8]) -> IResult<&[u8], CGBlock> {
     Ok((input, cg_block))
 }
 
-/// Data group block basic(24 bytes)
+/// DGBlock basic parser, basic info with fix length(24bytes)
 pub(crate) fn dg_block_basic(input: &[u8]) -> IResult<&[u8], DGBlock> {
     let (
         input,
@@ -427,35 +434,7 @@ pub(crate) fn dg_block_basic(input: &[u8]) -> IResult<&[u8], DGBlock> {
     Ok((input, dg_block))
 }
 
-pub(crate) fn read_le_u64(input: &[u8]) -> IResult<&[u8], u64> {
-    Ok(le_u64(input)?)
-}
-
-pub(crate) fn read_le_u32(input: &[u8]) -> IResult<&[u8], u32> {
-    Ok(le_u32(input)?)
-}
-
-pub(crate) fn read_le_i16(input: &[u8]) -> IResult<&[u8], i16> {
-    Ok(le_i16(input)?)
-}
-
-pub(crate) fn read_le_u16(input: &[u8]) -> IResult<&[u8], u16> {
-    Ok(le_u16(input)?)
-}
-
-pub(crate) fn read_n_le_f64(input: &[u8], number: usize) -> IResult<&[u8], Vec<f64>> {
-    count(le_f64, number)(input)
-}
-
-pub(crate) fn read_str(input: &[u8], count: u32) -> IResult<&[u8], String> {
-    let (input, result) = take(count)(input)?;
-    let result = String::from_utf8_lossy(result)
-        .trim_matches('\0')
-        .to_string();
-    Ok((input, result))
-}
-
-// TXBlock basis is 2 bytes
+/// TXBlock basic parser, basic info with fix length(2bytes)
 pub(crate) fn tx_block_basic(input: &[u8]) -> IResult<&[u8], TXBlock> {
     let (input, (id, block_size)) = (block_base_v3)(input)?;
 

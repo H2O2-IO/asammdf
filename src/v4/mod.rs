@@ -1,12 +1,10 @@
-use asammdf_derive::{comment_object, header_object, id_object, mdf_object, normal_object};
+use asammdf_derive::{comment_object, id_object, mdf_object, normal_object};
 use asammdf_derive::{IDObject, MDFObject, PermanentBlock};
 
 use super::SpecVer;
 use super::UnfinalizedFlagsType;
-use crate::DateTime;
 use crate::MDFObject;
 use crate::PermanentBlock;
-use crate::Utc;
 use crate::{IDObject, TimeFlagsType, TimeQualityType};
 
 mod parser;
@@ -151,7 +149,7 @@ impl IDBlock {
             block_size: 64,
             name: "ID".to_string(),
             file_id: "MDF     ".to_string(),
-            spec_type: Some(SpecVer::V4),
+            spec_type: SpecVer::V4,
             unfinalized_flags: None,
             version: 410,
             custom_flags: 0,
@@ -165,11 +163,10 @@ impl IDBlock {
 }
 
 #[comment_object]
-#[header_object]
 #[normal_object]
 pub struct HDBlock {
     // TODO: store in arena,or inside this object?
-    pub ATBlocks: Vec<ATBlock>,
+    pub atb_locks: Vec<ATBlock>,
     pub dst_offset: i16,
     pub flags: TimeFlagsType,
     pub start_angle: f64,

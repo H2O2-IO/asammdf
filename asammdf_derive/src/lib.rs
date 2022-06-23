@@ -63,10 +63,10 @@ pub fn id_object(_args: TokenStream, input:TokenStream) -> TokenStream{
     let _ = parse_macro_input!(_args as parse::Nothing);
 
     if let syn::Fields::Named(ref mut fields) = item_struct.fields {
-        fields.named.push(get_field_def(quote! { pub file_id:String}));
-        fields.named.push(get_field_def(quote! { pub spec_type:Option<SpecVer>}));
+        fields.named.push(get_field_def(quote! { file_id:String}));
+        fields.named.push(get_field_def(quote! { spec_type:SpecVer}));
         fields.named.push(get_field_def(quote! { pub unfinalized_flags:Option<UnfinalizedFlagsType>}));
-        fields.named.push(get_field_def(quote! { pub version:u16}));
+        fields.named.push(get_field_def(quote! { version:u16}));
         fields.named.push(get_field_def(quote! { pub custom_flags:u16}));
     }
 
@@ -84,20 +84,6 @@ pub fn basic_object(_args: TokenStream, input:TokenStream) -> TokenStream{
 
     if let syn::Fields::Named(ref mut fields) = item_struct.fields {
         fields.named.push(get_field_def(quote! { block_id:Option<BlockId>}));
-    }
-
-    return quote! {
-        #item_struct
-    }
-    .into();
-}
-
-#[proc_macro_attribute]
-pub fn header_object(_args: TokenStream, input:TokenStream) -> TokenStream{
-    let mut item_struct = parse_macro_input!(input as ItemStruct);
-    let _ = parse_macro_input!(_args as parse::Nothing);
-
-    if let syn::Fields::Named(ref mut fields) = item_struct.fields {
     }
 
     return quote! {
@@ -143,8 +129,11 @@ pub fn channel_object(_args: TokenStream, input:TokenStream) -> TokenStream{
     let _ = parse_macro_input!(_args as parse::Nothing);
 
     if let syn::Fields::Named(ref mut fields) = item_struct.fields {
-        fields.named.push(get_field_def(quote! { pub add_offset:u32}));
-        fields.named.push(get_field_def(quote! { pub bitmask_cache:u64}));
+        fields.named.push(get_field_def(quote! {
+            /// additional offset
+            pub add_offset:u32
+        }));
+        // fields.named.push(get_field_def(quote! { pub bitmask_cache:u64}));
         fields.named.push(get_field_def(quote! { pub bit_offset:u16}));
         fields.named.push(get_field_def(quote! { pub channel_type:Option<ChannelType>}));
         fields.named.push(get_field_def(quote! { pub max_raw:f64}));
@@ -196,18 +185,19 @@ fn impl_id_object_derive(ast: &DeriveInput) -> TokenStream {
     
     let gen = quote! {
         impl IDObject for #name {
+            /// get the file_id(aka magic number) of IDBlock
             fn file_id(&self) -> String {
                 self.file_id.clone()
             }
-        
-            fn spec_type(&self) -> Option<SpecVer> {
+            /// get specification version of this IDObject
+            fn spec_type(&self) -> SpecVer {
                 self.spec_type
             }
-        
+            /// get unifinalized flags type of this IDObject
             fn unfinalized_flags_type(&self) -> Option<UnfinalizedFlagsType> {
                 self.unfinalized_flags
             }
-        
+            /// get the version code of this IDObject,
             fn version(&self) -> u16 {
                 self.version
             }
