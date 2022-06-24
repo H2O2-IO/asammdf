@@ -1,13 +1,14 @@
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Cursor, BufReader};
+use std::sync::Arc;
 
 use asammdf_derive::{
-    basic_object, comment_object, data_group_object, id_object, mdf_object, normal_object_v4,
+    basic_object, comment_object, data_group_object, id_object, mdf_object, normal_object_v4, channel_group_object,
 };
 use asammdf_derive::{IDObject, MDFObject, PermanentBlock};
 use chrono::{DateTime, Local};
 use itertools::Zip;
 
-use self::parser::{block_base, dg_block_basic, dl_block_basic, hd_block_basic, hl_block_basic};
+use self::parser::{block_base, dg_block_basic, dl_block_basic, hd_block_basic, hl_block_basic, dz_block_basic, si_block_basic};
 
 use super::SpecVer;
 use super::UnfinalizedFlagsType;
@@ -53,19 +54,21 @@ pub enum SRFlags {
     InvalidationBytes = 1,
 }
 
+enum_u32_convert! {
 #[derive(Clone, Copy, Debug)]
 pub enum Source {
-    Other,
     ECU,
     Bus,
     IO,
     Tool,
     User,
 }
-
+}
+enum_u32_convert! {
 #[derive(Clone, Copy, Debug)]
 pub enum SourceFlags {
     SimulatedSource,
+}
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -147,9 +150,9 @@ pub enum Cause {
     User,
 }
 
+enum_u32_convert! {
 #[derive(Clone, Copy, Debug)]
 pub enum BusType {
-    Other,
     CAN,
     LIN,
     MOST,
@@ -157,6 +160,7 @@ pub enum BusType {
     KLINE,
     Ethernet,
     USB,
+}
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -474,6 +478,7 @@ pub struct DGBlock {
     pub(crate) link_comment: u64,
     pub(crate) link_next_block: u64,
     pub(crate) link_data_block: u64,
+    pub(crate) zip_reader: Option<ZippedReader>,
 }
 
 impl MDFObject for DGBlock {
@@ -485,6 +490,55 @@ impl MDFObject for DGBlock {
         "Data group".to_string()
     }
 }
+#[derive(Debug, Clone)]
+pub struct ZippedReader {
+    pub tmp_file: Option<Cursor<Vec<u8>>>,
+}
+
+impl ZippedReader {
+    pub fn new()->Self{
+        ZippedReader{
+            tmp_file: Some(Cursor::new(Vec::new())),
+        }
+    }
+    pub fn reset(&mut self) {
+        self.tmp_file = None;
+    }
+    pub fn get_buf_cursor(&mut self) -> Result<&mut Cursor<Vec<u8>>, MDFErrorKind> {
+        self.tmp_file.as_mut().ok_or(MDFErrorKind::ZippedReaderError)
+    }
+    pub fn get_position(&self) -> u64 {
+        self.tmp_file.as_ref().unwrap().position()
+    }
+    pub fn set_position(&mut self, pos: u64) {
+        self.tmp_file.as_mut().unwrap().set_position(pos);
+    }
+}
+
+struct CRCHelper {
+    pub high: i32,
+    pub low:i32,
+}
+
+impl CRCHelper {
+    pub fn new() -> Self {
+        CRCHelper {
+            high: 0,
+            low: 1,
+        }
+    }
+    pub fn get_crc_val(&self)->i32 {
+        self.high*65535 + self.low
+    }
+    pub fn build_crc(&mut self,data:&[u8], offset: i32, length: i32) {
+        for i in 0..length {
+            self.low = (self.low + data[(offset + i) as usize] as i32) % 65521;
+            self.high = (self.high + self.low) % 65521;
+        }
+    }
+}
+
+
 
 impl DGBlock {
     pub fn new() -> Self {
@@ -499,6 +553,7 @@ impl DGBlock {
             link_comment: 0,
             link_data_block: 0,
             link_next_block: 0,
+            zip_reader:None,
         }
     }
     /// parse a DGBlock from file position at link_id, then add it to instance as child of parent_id
@@ -687,7 +742,7 @@ impl<'a> HLBlock {
             .unwrap();
 
         instance
-            .get_mut_node_by_id::<DGBlock>(hl_id)
+            .get_mut_node_by_id::<HLBlock>(hl_id)
             .unwrap()
             .block_id = Some(hl_id);
         // parse dl blocks
@@ -790,7 +845,7 @@ impl DLBlock {
             .unwrap();
 
         instance
-            .get_mut_node_by_id::<DGBlock>(dl_id)
+            .get_mut_node_by_id::<DLBlock>(dl_id)
             .unwrap()
             .block_id = Some(dl_id);
 
@@ -803,10 +858,12 @@ impl DLBlock {
                 match id.as_str() {
                     "DT" => {
                         // parse a DT Block
-                        DTBlock::parse(byte_order, *link as u64, dl_id, instance)?;
+                        let dt_id = DTBlock::parse(byte_order, *link as u64, dl_id, instance)?;
                     }
                     "DZ" => {
                         // parse a DZ block
+                        let (dz_id,data) = DZBlock::parse(byte_order, *link as u64, dl_id, instance)?;
+
                     }
                     _ => {
                         // do nothing
@@ -820,6 +877,10 @@ impl DLBlock {
 
         Ok(link_dl_next)
     }
+}
+
+fn read_one_dt_block(block_id:BlockId,mdf_file:&mut MDFFile,position:u64) {
+
 }
 
 #[normal_object_v4]
@@ -859,7 +920,7 @@ impl DTBlock {
         link_id: u64,
         parent_id: BlockId,
         instance: &mut MDFFile,
-    ) -> Result<(), MDFErrorKind> {
+    ) -> Result<(BlockId), MDFErrorKind> {
         let mut buf_reader = instance.get_buf_reader()?;
         let pos = buf_reader.stream_position().unwrap();
         // seek to link_id position
@@ -879,14 +940,14 @@ impl DTBlock {
             .checked_append(dt_id, &mut instance.arena)
             .unwrap();
         instance
-            .get_mut_node_by_id::<DGBlock>(dt_id)
+            .get_mut_node_by_id::<DTBlock>(dt_id)
             .unwrap()
             .block_id = Some(dt_id);
 
         // restore stream position
         buf_reader.seek(SeekFrom::Start(pos)).unwrap();
 
-        Ok(())
+        Ok(dt_id)
     }
 }
 
@@ -933,8 +994,142 @@ impl DZBlock {
         }
     }
 
-    pub fn block_type(&self)->String {
+    pub fn block_type(&self) -> String {
         self.block_type.clone()
+    }
+
+    pub fn parse(
+        byte_order: ByteOrder,
+        link_id: u64,
+        parent_id: BlockId,
+        instance: &mut MDFFile,
+    ) -> Result<(BlockId,Vec<u8>), MDFErrorKind> {
+        let mut buf_reader = instance.get_buf_reader()?;
+        let pos = buf_reader.stream_position().unwrap();
+        // seek to link_id position
+        buf_reader.seek(SeekFrom::Start(link_id)).unwrap();
+        // read the block basic info
+        let (id, block_size, links, next_pos) = read_v4_basic_info(link_id, instance)?;
+
+        // go to next pos, and construct dz block
+        buf_reader.seek(SeekFrom::Start(next_pos)).unwrap();
+        let mut data = vec![0; 24];
+        buf_reader.read_exact(&mut data).unwrap();
+        let mut dz_block = dz_block_basic(&data, id, block_size, links.len() as u64).unwrap().1;
+        // whether if zip type supported
+        if dz_block.zip_type.is_none() {
+            return Err(MDFErrorKind::UnsupportedZipType);
+        }
+        // read compressed data out
+        let mut compressed_data = vec![0; dz_block.length as usize];
+        buf_reader.read_exact(&mut compressed_data).unwrap();
+
+        // save dz block to instance's arena
+        let dz_id = instance.arena.new_node(Box::new(dz_block));
+        // add dt block to parent
+        parent_id
+            .checked_append(dz_id, &mut instance.arena)
+            .unwrap();
+        instance
+            .get_mut_node_by_id::<DGBlock>(dz_id)
+            .unwrap()
+            .block_id = Some(dz_id);
+
+        // restore stream position
+        buf_reader.seek(SeekFrom::Start(pos)).unwrap();
+
+        Ok((dz_id,compressed_data))
+    }
+}
+
+#[normal_object_v4]
+#[channel_group_object]
+#[comment_object]
+#[basic_object]
+#[derive(Debug, Clone, PermanentBlock)]
+pub struct CGBlock {
+    pub(crate) link_next_cgblock: u64,
+    pub acquisition_name:String,
+    pub flags: Option<ChannelGroupFlags>,
+    pub inval_size: u32,
+    pub path_separator: u8,
+    pub record_id:u64,
+}
+
+impl MDFObject for CGBlock {
+    fn block_size(&self) -> u64 {
+        self.block_size
+    }
+
+    fn name(&self) -> String {
+        "Channel group".to_string()
+    }
+}
+
+impl CGBlock {
+    pub fn new(comment:String) -> Self {
+        CGBlock {
+            link_next_cgblock: 0,
+            acquisition_name: Default::default(),
+            flags: None,
+            inval_size: 0,
+            path_separator: 0,
+            record_id: 0,
+            id: "CG".to_string(),
+            block_size: 104,
+            links_count: 6,
+            record_count: 0,
+            record_size: 0,
+            comment,
+            block_id: None,
+        }
+    }
+}
+
+
+
+#[normal_object_v4]
+#[comment_object]
+#[basic_object]
+#[derive(Debug, Clone, PermanentBlock)]
+pub struct SIBlock {
+    pub bus_type: Option<BusType>,
+    pub flags: Option<SourceFlags>,
+    pub name: String,
+    pub path: String,
+    pub source_type: Option<Source>,
+    pub(crate) link_name: u64,
+    pub(crate) link_path: u64,
+    pub(crate) link_comment: u64,
+}
+
+impl MDFObject for SIBlock {
+    fn block_size(&self) -> u64 {
+        self.block_size
+    }
+
+    fn name(&self) -> String {
+        self.name.clone()
+    }
+}
+
+impl SIBlock {
+    pub fn new(source_type: Option<Source>, bus_type: Option<BusType>, name:String,path:String,comment:String,source_flags:Option<SourceFlags>) -> Self {
+        SIBlock {
+            bus_type,
+            flags: source_flags,
+            name,
+            path,
+            source_type,
+            id: "SI".to_string(),
+            block_size: 56,
+            links_count: 3,
+            block_id: None,
+            comment,
+            link_name: 0,
+            link_path: 0,
+            link_comment: 0,
+        }
     }
 
     pub fn parse(
@@ -949,25 +1144,55 @@ impl DZBlock {
         buf_reader.seek(SeekFrom::Start(link_id)).unwrap();
         // read the block basic info
         let (id, block_size, links, next_pos) = read_v4_basic_info(link_id, instance)?;
-        let mut dt_block = DTBlock::new(0);
-        dt_block.id = id;
-        dt_block.block_size = block_size as u64;
-        dt_block.links_count = links.len() as u64;
-        dt_block.base_position = next_pos as i64;
 
-        // save dt block to instance's arena
-        let dt_id = instance.arena.new_node(Box::new(dt_block));
+        // go to next pos, and construct si block
+        buf_reader.seek(SeekFrom::Start(next_pos)).unwrap();
+        let mut data = vec![0; 3];
+        buf_reader.read_exact(&mut data).unwrap();
+        let mut si_block = si_block_basic(&data, id, block_size, links.len() as u64).unwrap().1;
+
+        let mut link_name = 0;
+        let mut link_comment = 0;
+        let mut link_path = 0;
+        // iterate over links to store name, path and comment link
+        for (i,val) in links.iter().enumerate() {
+            match i {
+                0 => link_name = *val,
+                1 => link_path = *val,
+                2 => link_comment = *val,
+                _ => unreachable!(),
+            }
+        }
+        si_block.link_name = link_name as u64;
+        si_block.link_comment = link_comment as u64;
+        si_block.link_path = link_path as u64;
+
+        // get name from name rdsdblock
+        let name_block = RDSDBlock::parse(byte_order,link_name as u64, instance)?;
+        si_block.name = String::from_utf8_lossy(&name_block.data).to_string();
+
+        // get path from path rdsdblock
+        let path_block = RDSDBlock::parse(byte_order,link_path as u64, instance)?;
+        si_block.path = String::from_utf8_lossy(&path_block.data).to_string();
+
+        // get comment from comment rdsdblock
+        let comment_block = RDSDBlock::parse(byte_order,link_comment as u64, instance)?;
+        si_block.comment = String::from_utf8_lossy(&comment_block.data).to_string();
+
+        // save dz block to instance's arena
+        let si_id = instance.arena.new_node(Box::new(si_block));
         // add dt block to parent
         parent_id
-            .checked_append(dt_id, &mut instance.arena)
+            .checked_append(si_id, &mut instance.arena)
             .unwrap();
         instance
-            .get_mut_node_by_id::<DGBlock>(dt_id)
+            .get_mut_node_by_id::<SIBlock>(si_id)
             .unwrap()
-            .block_id = Some(dt_id);
+            .block_id = Some(si_id);
 
         // restore stream position
         buf_reader.seek(SeekFrom::Start(pos)).unwrap();
 
         Ok(())
+    }
 }

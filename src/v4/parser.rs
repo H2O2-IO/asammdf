@@ -1,6 +1,6 @@
 use crate::ByteOrder;
 
-use super::{DGBlock, DLBlock, DTBlock, HDBlock, HLBlock, IDBlock};
+use super::{DGBlock, DLBlock, DTBlock, HDBlock, HLBlock, IDBlock, DZBlock, SIBlock};
 use chrono::Local;
 use nom::bytes::complete::take;
 use nom::number::complete::{le_f64, le_i16, le_i64, le_u16, le_u32, le_u64, le_u8};
@@ -166,4 +166,72 @@ pub(crate) fn dl_block_basic(
     dl_block.equal_length = equal_length;
 
     Ok((input, dl_block))
+}
+
+/// DZBlock basic info, fix length(24bytes)
+pub(crate) fn dz_block_basic(
+    input: &[u8],
+    id: String,
+    block_size: i64,
+    link_count: u64,
+) -> IResult<&[u8], DZBlock> {
+    let (input, (
+        block_type_bytes,
+        zip_type,
+        _,
+        zip_parameter,
+        size,
+        length,
+    )) =
+        tuple((
+            take(2u32),
+            le_u8,
+            take(1u32),
+            le_u32,
+            le_i64,
+            le_u64,
+    ))(input)?;
+
+    // conver zip_type
+    let zip_type = (zip_type as u32).try_into().map_or(None, |x| Some(x));
+    let block_type = String::from_utf8_lossy(block_type_bytes).to_string();
+
+    // prepare basic info
+    let mut dz_block = DZBlock::new(length,size,zip_type,zip_parameter,Some(block_type));
+    dz_block.id = id;
+    dz_block.block_size = block_size as u64;
+    dz_block.links_count = link_count;
+
+    Ok((input, dz_block))
+}
+
+/// SIBlock basic info, fix length(3bytes)
+pub(crate) fn si_block_basic(
+    input: &[u8],
+    id: String,
+    block_size: i64,
+    link_count: u64,
+) -> IResult<&[u8], SIBlock> {
+    let (input, (
+        source_type,
+        bus_type,
+        flags,
+    )) =
+        tuple((
+            le_u8,
+            le_u8,
+            le_u8,
+        ))(input)?;
+    // convert source_type,bus_type,flags to coresponding enum
+    let source_type = (source_type as u32).try_into().map_or(None, |x| Some(x));
+    let bus_type = (bus_type as u32).try_into().map_or(None, |x| Some(x));
+    let flags = (flags as u32).try_into().map_or(None, |x| Some(x));
+
+    // prepare basic info
+    let mut si_block = SIBlock::new(source_type, bus_type, Default::default(),Default::default(),Default::default(),flags);
+    si_block.id = id;
+    si_block.block_size = block_size as u64;
+    si_block.links_count = link_count;
+
+    Ok((input, si_block))
 }

@@ -1,4 +1,4 @@
-use crate::ConversionType;
+use crate::{BlockId, ConversionType, MDFFile, PermanentBlock};
 
 /// params of `ConversionType::Rational` with transform (self) -> (self)
 pub const RATIONAL_PARAM_ARRAY_I: [f64; 6] = [0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
@@ -80,4 +80,11 @@ pub(crate) mod helper {
             .to_string();
         Ok((input, result))
     }
+}
+
+pub(crate) fn save_to_arena_store_block_id<B>(block: B, parent_id: BlockId, mdf_file: &mut MDFFile)
+where
+    B: PermanentBlock,
+{
+    // TODO: edit PermanetBlock to satisfy this method
 }

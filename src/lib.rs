@@ -312,6 +312,8 @@ pub enum MDFErrorKind {
     CCBlockError(String),
     CEBlockError(String),
     VersionError(String),
+    UnsupportedZipType,
+    ZippedReaderError,
 }
 
 /// MDFFile

@@ -238,7 +238,8 @@ fn impl_permanent_block_derive(ast: &DeriveInput) -> TokenStream {
     let name = &ast.ident;
     
     let gen = quote! {
-        impl PermanentBlock for #name {}
+        impl PermanentBlock for #name {
+        }
     };
     gen.into()
 }
