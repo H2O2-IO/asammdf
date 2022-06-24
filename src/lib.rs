@@ -120,6 +120,7 @@ pub enum ValueFormat {
     RawBin,
 }
 
+enum_u32_convert! {
 #[derive(Clone, Copy, Debug)]
 pub enum RecordIDType {
     Before8Bit = 1,
@@ -127,6 +128,7 @@ pub enum RecordIDType {
     Before32Bit = 4,
     Before64Bit = 8,
     BeforeAndAfter8Bit = 255,
+}
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -192,12 +194,14 @@ pub enum SyncType {
     Distance,
     Index,
 }
+
+enum_u32_convert! {
 #[derive(Clone, Copy, Debug)]
 pub enum TimeFlagsType {
     LocalTime = 1,
     OffsetsValid,
 }
-
+}
 enum_u32_convert! {
 #[derive(Clone, Copy, Debug)]
 pub enum TimeQualityType {
@@ -311,16 +315,16 @@ pub enum MDFErrorKind {
 }
 
 /// MDFFile
-/// 
+///
 /// Example:
-/// 
+///
 /// ```
 /// use asammdf::{MDFFile,SpecVer};
 /// let mut file = MDFFile::new();
 /// file.open("./mdf3.dat".to_string()).unwrap();
 /// assert_eq!(file.spec_ver,Some(SpecVer::V3));
 /// ```
-/// 
+///
 /// TODO: use memory map file to parse file for better performance
 #[derive(Debug)]
 pub struct MDFFile {
@@ -427,7 +431,7 @@ impl MDFFile {
                 .map_or(ByteOrder::LittleEndian, |x| x);
             // v3::hdblock
             v3::HDBlock::parse(byte_order, self)?;
-        } else if self.spec_ver.is_some() {
+        } else if self.is_v4() {
         } else {
             return Err(MDFErrorKind::VersionError(
                 "MDF Specification Verion unsupported!".into(),

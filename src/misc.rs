@@ -46,7 +46,7 @@ pub(crate) mod helper {
     use nom::{
         bytes::complete::take,
         multi::count,
-        number::complete::{le_f32, le_f64, le_i16, le_u16, le_u32, le_u64},
+        number::complete::{le_f32, le_f64, le_i16, le_i64, le_u16, le_u32, le_u64},
         IResult,
     };
     pub(crate) fn read_le_u16(input: &[u8]) -> IResult<&[u8], u16> {
@@ -69,6 +69,9 @@ pub(crate) mod helper {
     }
     pub(crate) fn read_le_i16(input: &[u8]) -> IResult<&[u8], i16> {
         Ok(le_i16(input)?)
+    }
+    pub(crate) fn read_le_i64(input: &[u8]) -> IResult<&[u8], i64> {
+        Ok(le_i64(input)?)
     }
     pub(crate) fn read_str(input: &[u8], count: u32) -> IResult<&[u8], String> {
         let (input, result) = take(count)(input)?;

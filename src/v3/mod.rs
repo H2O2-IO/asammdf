@@ -4,7 +4,7 @@ use std::ops::Range;
 
 use asammdf_derive::{
     basic_object, channel_group_object, channel_object, comment_object, data_group_object,
-    id_object, mdf_object, normal_object,
+    id_object, mdf_object, normal_object_v3,
 };
 
 use asammdf_derive::{IDObject, MDFObject, PermanentBlock};
@@ -108,7 +108,7 @@ impl IDBlock {
 }
 
 #[comment_object]
-#[normal_object]
+#[normal_object_v3]
 #[basic_object]
 #[derive(Debug, Clone, PermanentBlock)]
 pub struct HDBlock {
@@ -255,7 +255,7 @@ impl<'a> HDObject<'a, DGBlock> for HDBlock {
     }
 }
 
-#[normal_object]
+#[normal_object_v3]
 #[comment_object]
 #[data_group_object]
 #[basic_object]
@@ -337,7 +337,7 @@ impl DGBlock {
     }
 }
 
-#[normal_object]
+#[normal_object_v3]
 #[channel_group_object]
 #[comment_object]
 #[basic_object]
@@ -481,7 +481,7 @@ impl<'a> CGObject<'a, CNBlock, DGBlock, SRBlock> for CGBlock {
     }
 }
 
-#[normal_object]
+#[normal_object_v3]
 #[channel_object]
 #[comment_object]
 #[basic_object]
@@ -703,7 +703,7 @@ impl<'a> CNObject<'a, CCBlock, CDBlock, CEBlock, CGBlock> for CNBlock {
     }
 }
 
-#[normal_object]
+#[normal_object_v3]
 #[derive(Debug, Clone, PermanentBlock)]
 pub struct SRBlock {
     /// Length of time interval(/s)
@@ -760,7 +760,7 @@ impl SRBlock {
 
 impl SRObject for SRBlock {}
 
-#[normal_object]
+#[normal_object_v3]
 #[comment_object]
 #[derive(Debug, Clone, PermanentBlock)]
 pub struct CCBlock {
@@ -1095,7 +1095,7 @@ impl TimeType {
 }
 
 /// Some extension blocks
-#[normal_object]
+#[normal_object_v3]
 #[derive(Debug, Clone, PermanentBlock)]
 pub struct CEBlock {
     pub dim: Option<DimType>,
@@ -1199,7 +1199,7 @@ impl DimType {
 }
 
 /// Dependency block
-#[normal_object]
+#[normal_object_v3]
 #[derive(Debug, Clone, PermanentBlock)]
 pub struct CDBlock {
     pub dependency_type: u16,
@@ -1272,7 +1272,7 @@ impl VectorCANType {
     }
 }
 /// Trigger Block
-#[normal_object]
+#[normal_object_v3]
 #[comment_object]
 #[derive(Debug, Clone, PermanentBlock)]
 pub struct TRBlock {
@@ -1358,7 +1358,7 @@ impl TriggerEvent {
 /// when writing to disk, block_size will be calculatd directly from self.text (self.text + 4 + 1).
 ///
 /// For convenience when writing, currently, we only store TXBlock as a String, not as child of parent block.
-#[normal_object]
+#[normal_object_v3]
 #[derive(Debug, Clone, PermanentBlock)]
 pub struct TXBlock {
     /// a string with a eol(`\0`) char, block size include this eol char.

@@ -27,13 +27,30 @@ pub fn mdf_object(_args: TokenStream, input:TokenStream) -> TokenStream{
 
 /// used in normal blocks (except ID Block)
 #[proc_macro_attribute]
-pub fn normal_object(_args: TokenStream, input:TokenStream) -> TokenStream{
+pub fn normal_object_v3(_args: TokenStream, input:TokenStream) -> TokenStream{
     let mut item_struct = parse_macro_input!(input as ItemStruct);
     let _ = parse_macro_input!(_args as parse::Nothing);
 
     if let syn::Fields::Named(ref mut fields) = item_struct.fields {
         fields.named.push(get_field_def(quote! { pub id:String}));
         fields.named.push(get_field_def(quote! { pub block_size:u64}));
+    }
+
+    return quote! {
+        #item_struct
+    }
+    .into();
+}
+
+#[proc_macro_attribute]
+pub fn normal_object_v4(_args: TokenStream, input:TokenStream) -> TokenStream{
+    let mut item_struct = parse_macro_input!(input as ItemStruct);
+    let _ = parse_macro_input!(_args as parse::Nothing);
+
+    if let syn::Fields::Named(ref mut fields) = item_struct.fields {
+        fields.named.push(get_field_def(quote! { pub id:String}));
+        fields.named.push(get_field_def(quote! { pub block_size:u64}));
+        fields.named.push(get_field_def(quote! { links_count:u64}));
     }
 
     return quote! {
