@@ -1,21 +1,34 @@
-use std::io::{Read, Seek, SeekFrom, Cursor, BufReader};
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};
+use std::ops::Range;
 use std::sync::Arc;
+use std::vec;
 
 use asammdf_derive::{
-    basic_object, comment_object, data_group_object, id_object, mdf_object, normal_object_v4, channel_group_object,
+    basic_object, channel_conversion_object, channel_group_object, channel_object, comment_object,
+    data_group_object, id_object, mdf_object, normal_object_v4,
 };
 use asammdf_derive::{IDObject, MDFObject, PermanentBlock};
 use chrono::{DateTime, Local};
 use itertools::Zip;
+use tempfile::tempfile;
 
-use self::parser::{block_base, dg_block_basic, dl_block_basic, hd_block_basic, hl_block_basic, dz_block_basic, si_block_basic};
-
+use self::parser::{
+    block_base, cc_block_basic, cg_block_basic, cn_block_basic, dg_block_basic, dl_block_basic,
+    dz_block_basic, fh_block_basic, hd_block_basic, hl_block_basic, si_block_basic,
+};
 use super::SpecVer;
 use super::UnfinalizedFlagsType;
-use crate::misc::helper::read_le_i64;
-use crate::PermanentBlock;
-use crate::{BlockId, IDObject, TimeFlagsType, TimeQualityType};
+use crate::misc::helper::{read_le_f64, read_le_i64, read_n_le_f64};
+use crate::misc::transform_params;
+use crate::{
+    BlockId, ChannelType, ConversionType, IDObject, SignalType, SyncType, TimeFlagsType,
+    TimeQualityType,
+};
 use crate::{ByteOrder, MDFErrorKind, MDFFile, MDFObject, RecordIDType};
+use crate::{CNObject, PermanentBlock};
+use bitflags::bitflags;
 
 mod parser;
 
@@ -103,6 +116,11 @@ pub enum Event {
     Marker,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum EventFlags {
+    PostProcessing = 1,
+}
+
 enum_u32_convert! {
 #[derive(Clone, Copy, Debug)]
 pub enum DataBlockFlags {
@@ -110,35 +128,41 @@ pub enum DataBlockFlags {
 }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub enum ConversionFlags {
-    PrecisionValid = 1,
-    LimitRangeValid = 2,
-    StatusString = 4,
+bitflags! {
+pub struct ConversionFlags:u16 {
+    const None = 0;
+    const PrecisionValid = 1;
+    const LimitRangeValid = 2;
+    const StatusString = 4;
+}
 }
 
+enum_u32_convert! {
 #[derive(Clone, Copy, Debug)]
 pub enum ChannelGroupFlags {
     VariableLenSignalData = 1,
     BusEvent = 2,
     PlainBusEvent = 4,
 }
+}
 
-#[derive(Clone, Copy, Debug)]
-pub enum ChannelFlags {
-    Invalid = 1,
-    InvalBytesValid = 2,
-    PrecisionValid = 4,
-    ValueRangeValid = 8,
-    LimitRangeValid = 16,
-    ExtendedLimitRangeValid = 32,
-    DiscreteValue = 64,
-    Calibration = 128,
-    Calculated = 256,
-    Virtual = 512,
-    BusEvent = 1024,
-    Montonous = 2048,
-    DefaultXAxis = 4096,
+bitflags! {
+pub struct ChannelFlags:u32 {
+    const None = 0;
+    const Invalid = 1;
+    const InvalBytesValid = 2;
+    const PrecisionValid = 4;
+    const ValueRangeValid = 8;
+    const LimitRangeValid = 16;
+    const ExtendedLimitRangeValid = 32;
+    const DiscreteValue = 64;
+    const Calibration = 128;
+    const Calculated = 256;
+    const Virtual = 512;
+    const BusEvent = 1024;
+    const Montonous = 2048;
+    const DefaultXAxis = 4096;
+}
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -215,7 +239,7 @@ impl IDBlock {
 #[comment_object]
 #[normal_object_v4]
 #[basic_object]
-#[derive(Debug, Clone, PermanentBlock)]
+#[derive(Debug, PermanentBlock)]
 pub struct HDBlock {
     pub dst_offset: i16,
     pub flags: Option<TimeFlagsType>,
@@ -386,7 +410,7 @@ fn read_v4_basic_info(
 #[comment_object]
 #[normal_object_v4]
 #[basic_object]
-#[derive(Debug, Clone, PermanentBlock)]
+#[derive(Debug, PermanentBlock)]
 pub struct ATBlock {
     pub attachment_flags: Option<AttachmentFlags>,
     pub creator_index: u16,
@@ -415,7 +439,7 @@ pub struct CHBlock {
 /// MDFv4 Block
 #[normal_object_v4]
 #[basic_object]
-#[derive(Debug, Clone, PermanentBlock)]
+#[derive(Debug, PermanentBlock)]
 pub struct RDSDBlock {
     pub data: Vec<u8>,
 }
@@ -472,7 +496,7 @@ impl RDSDBlock {
 #[comment_object]
 #[data_group_object]
 #[basic_object]
-#[derive(Debug, Clone, PermanentBlock)]
+#[derive(Debug, PermanentBlock)]
 pub struct DGBlock {
     pub(crate) link_cg_start: u64,
     pub(crate) link_comment: u64,
@@ -490,55 +514,49 @@ impl MDFObject for DGBlock {
         "Data group".to_string()
     }
 }
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ZippedReader {
-    pub tmp_file: Option<Cursor<Vec<u8>>>,
+    pub tmp_file: File,
 }
 
 impl ZippedReader {
-    pub fn new()->Self{
-        ZippedReader{
-            tmp_file: Some(Cursor::new(Vec::new())),
+    pub fn new() -> Self {
+        ZippedReader {
+            tmp_file: tempfile().unwrap(),
         }
     }
-    pub fn reset(&mut self) {
-        self.tmp_file = None;
+    pub fn get_buf_reader(&self) -> Result<BufReader<File>, MDFErrorKind> {
+        let x = self
+            .tmp_file
+            .try_clone()
+            .map_err(|x| MDFErrorKind::IOError(x))?;
+        Ok(BufReader::new(x))
     }
-    pub fn get_buf_cursor(&mut self) -> Result<&mut Cursor<Vec<u8>>, MDFErrorKind> {
-        self.tmp_file.as_mut().ok_or(MDFErrorKind::ZippedReaderError)
-    }
-    pub fn get_position(&self) -> u64 {
-        self.tmp_file.as_ref().unwrap().position()
-    }
-    pub fn set_position(&mut self, pos: u64) {
-        self.tmp_file.as_mut().unwrap().set_position(pos);
+
+    pub fn get_position(&mut self) -> u64 {
+        self.tmp_file.stream_position().unwrap()
     }
 }
 
 struct CRCHelper {
     pub high: i32,
-    pub low:i32,
+    pub low: i32,
 }
 
 impl CRCHelper {
     pub fn new() -> Self {
-        CRCHelper {
-            high: 0,
-            low: 1,
-        }
+        CRCHelper { high: 0, low: 1 }
     }
-    pub fn get_crc_val(&self)->i32 {
-        self.high*65535 + self.low
+    pub fn get_crc_val(&self) -> i32 {
+        self.high * 65535 + self.low
     }
-    pub fn build_crc(&mut self,data:&[u8], offset: i32, length: i32) {
+    pub fn build_crc(&mut self, data: &[u8], offset: i32, length: i32) {
         for i in 0..length {
             self.low = (self.low + data[(offset + i) as usize] as i32) % 65521;
             self.high = (self.high + self.low) % 65521;
         }
     }
 }
-
-
 
 impl DGBlock {
     pub fn new() -> Self {
@@ -553,7 +571,7 @@ impl DGBlock {
             link_comment: 0,
             link_data_block: 0,
             link_next_block: 0,
-            zip_reader:None,
+            zip_reader: None,
         }
     }
     /// parse a DGBlock from file position at link_id, then add it to instance as child of parent_id
@@ -670,7 +688,7 @@ impl DGBlock {
 
 #[normal_object_v4]
 #[basic_object]
-#[derive(Debug, Clone, PermanentBlock)]
+#[derive(Debug, PermanentBlock)]
 pub struct HLBlock {
     pub zip_type: Option<ZipType>,
     pub flags: Option<DataBlockFlags>,
@@ -764,7 +782,7 @@ impl<'a> HLBlock {
 
 #[normal_object_v4]
 #[basic_object]
-#[derive(Debug, Clone, PermanentBlock)]
+#[derive(Debug, PermanentBlock)]
 pub struct DLBlock {
     pub count: u32,
     pub equal_length: u64,
@@ -862,8 +880,8 @@ impl DLBlock {
                     }
                     "DZ" => {
                         // parse a DZ block
-                        let (dz_id,data) = DZBlock::parse(byte_order, *link as u64, dl_id, instance)?;
-
+                        let (dz_id, data) =
+                            DZBlock::parse(byte_order, *link as u64, dl_id, instance)?;
                     }
                     _ => {
                         // do nothing
@@ -879,13 +897,11 @@ impl DLBlock {
     }
 }
 
-fn read_one_dt_block(block_id:BlockId,mdf_file:&mut MDFFile,position:u64) {
-
-}
+fn read_one_dt_block(block_id: BlockId, mdf_file: &mut MDFFile, position: u64) {}
 
 #[normal_object_v4]
 #[basic_object]
-#[derive(Debug, Clone, PermanentBlock)]
+#[derive(Debug, PermanentBlock)]
 pub struct DTBlock {
     pub base_position: i64,
 }
@@ -954,9 +970,11 @@ impl DTBlock {
 /// Zipped data blocks
 #[normal_object_v4]
 #[basic_object]
-#[derive(Debug, Clone, PermanentBlock)]
+#[derive(Debug, PermanentBlock)]
 pub struct DZBlock {
+    /// compressed size of data block
     pub length: u64,
+    /// uncompressed size of data block
     pub size: i64,
     pub zip_parameter: u32,
     pub zip_type: Option<ZipType>,
@@ -1003,7 +1021,7 @@ impl DZBlock {
         link_id: u64,
         parent_id: BlockId,
         instance: &mut MDFFile,
-    ) -> Result<(BlockId,Vec<u8>), MDFErrorKind> {
+    ) -> Result<(BlockId, Vec<u8>), MDFErrorKind> {
         let mut buf_reader = instance.get_buf_reader()?;
         let pos = buf_reader.stream_position().unwrap();
         // seek to link_id position
@@ -1015,7 +1033,9 @@ impl DZBlock {
         buf_reader.seek(SeekFrom::Start(next_pos)).unwrap();
         let mut data = vec![0; 24];
         buf_reader.read_exact(&mut data).unwrap();
-        let mut dz_block = dz_block_basic(&data, id, block_size, links.len() as u64).unwrap().1;
+        let mut dz_block = dz_block_basic(&data, id, block_size, links.len() as u64)
+            .unwrap()
+            .1;
         // whether if zip type supported
         if dz_block.zip_type.is_none() {
             return Err(MDFErrorKind::UnsupportedZipType);
@@ -1038,7 +1058,7 @@ impl DZBlock {
         // restore stream position
         buf_reader.seek(SeekFrom::Start(pos)).unwrap();
 
-        Ok((dz_id,compressed_data))
+        Ok((dz_id, compressed_data))
     }
 }
 
@@ -1046,14 +1066,19 @@ impl DZBlock {
 #[channel_group_object]
 #[comment_object]
 #[basic_object]
-#[derive(Debug, Clone, PermanentBlock)]
+#[derive(Debug, PermanentBlock)]
 pub struct CGBlock {
     pub(crate) link_next_cgblock: u64,
-    pub acquisition_name:String,
+    pub(crate) link_cn_start: u64,
+    pub(crate) link_acquisition_name: u64,
+    pub(crate) link_si_block: u64,
+    pub(crate) link_sr_start: u64,
+    pub(crate) link_comment: u64,
+    pub acquisition_name: String,
     pub flags: Option<ChannelGroupFlags>,
     pub inval_size: u32,
-    pub path_separator: u8,
-    pub record_id:u64,
+    pub path_separator: char,
+    pub record_id: u64,
 }
 
 impl MDFObject for CGBlock {
@@ -1067,13 +1092,13 @@ impl MDFObject for CGBlock {
 }
 
 impl CGBlock {
-    pub fn new(comment:String) -> Self {
+    pub fn new(comment: String) -> Self {
         CGBlock {
             link_next_cgblock: 0,
             acquisition_name: Default::default(),
             flags: None,
             inval_size: 0,
-            path_separator: 0,
+            path_separator: Default::default(),
             record_id: 0,
             id: "CG".to_string(),
             block_size: 104,
@@ -1082,16 +1107,113 @@ impl CGBlock {
             record_size: 0,
             comment,
             block_id: None,
+            link_cn_start: 0,
+            link_acquisition_name: 0,
+            link_si_block: 0,
+            link_sr_start: 0,
+            link_comment: 0,
         }
     }
+
+    pub fn parse(
+        byte_order: ByteOrder,
+        link_id: u64,
+        parent_id: BlockId,
+        instance: &mut MDFFile,
+    ) -> Result<u64, MDFErrorKind> {
+        let mut buf_reader = instance.get_buf_reader()?;
+        let pos = buf_reader.stream_position().unwrap();
+        // seek to link_id position
+        buf_reader.seek(SeekFrom::Start(link_id)).unwrap();
+        // read the block basic info
+        let (id, block_size, links, next_pos) = read_v4_basic_info(link_id, instance)?;
+
+        // go to next pos, and construct cg block(size 32bytes)
+        buf_reader.seek(SeekFrom::Start(next_pos)).unwrap();
+        let mut data = vec![0; 32];
+        buf_reader.read_exact(&mut data).unwrap();
+        let mut cg_block = cg_block_basic(&data, id, block_size, links.len() as u64)
+            .unwrap()
+            .1;
+        // get links out
+        let mut link_next_cgblock = 0;
+        let mut link_cn_start = 0;
+        let mut link_acquisition_name = 0;
+        let mut link_si_block = 0;
+        let mut link_sr_start = 0;
+        let mut link_comment = 0;
+        // loop links and assign links
+        for (i, val) in links.iter().enumerate() {
+            match i {
+                0 => link_next_cgblock = *val,
+                1 => link_cn_start = *val,
+                2 => link_acquisition_name = *val,
+                3 => link_si_block = *val,
+                4 => link_sr_start = *val,
+                5 => link_comment = *val,
+                _ => {}
+            }
+        }
+        // save links to cg_block
+        cg_block.link_next_cgblock = link_next_cgblock as u64;
+        cg_block.link_cn_start = link_cn_start as u64;
+        cg_block.link_acquisition_name = link_acquisition_name as u64;
+        cg_block.link_si_block = link_si_block as u64;
+        cg_block.link_sr_start = link_sr_start as u64;
+        cg_block.link_comment = link_comment as u64;
+
+        // parse comment block
+        if link_comment > 0 {
+            let comment_block = RDSDBlock::parse(byte_order, link_comment as u64, instance)?;
+            cg_block.comment = String::from_utf8_lossy(&comment_block.data).to_string();
+        }
+        // parse acquisition name block
+        if link_acquisition_name > 0 {
+            let acquisition_name_block =
+                RDSDBlock::parse(byte_order, link_acquisition_name as u64, instance)?;
+            cg_block.acquisition_name =
+                String::from_utf8_lossy(&acquisition_name_block.data).to_string();
+        }
+
+        // save cg block to instance's arena
+        let cg_id = instance.arena.new_node(Box::new(cg_block));
+        // add cg block to parent
+        parent_id
+            .checked_append(cg_id, &mut instance.arena)
+            .unwrap();
+        // save cg_id to self
+        instance
+            .get_mut_node_by_id::<CGBlock>(cg_id)
+            .unwrap()
+            .block_id = Some(cg_id);
+
+        // parse acquisition source
+        if link_si_block > 0 {
+            SIBlock::parse(byte_order, link_si_block as u64, cg_id, instance)?;
+        }
+
+        // parse cn blocks
+        let mut cn_link = link_cn_start;
+        while cn_link > 0 {
+            break;
+        }
+
+        // parse sr blocks
+        let mut sr_link = link_sr_start;
+        while sr_link > 0 {
+            break;
+        }
+
+        // restore stream position
+        buf_reader.seek(SeekFrom::Start(pos)).unwrap();
+        Ok(link_next_cgblock as u64)
+    }
 }
-
-
 
 #[normal_object_v4]
 #[comment_object]
 #[basic_object]
-#[derive(Debug, Clone, PermanentBlock)]
+#[derive(Debug, PermanentBlock)]
 pub struct SIBlock {
     pub bus_type: Option<BusType>,
     pub flags: Option<SourceFlags>,
@@ -1114,7 +1236,14 @@ impl MDFObject for SIBlock {
 }
 
 impl SIBlock {
-    pub fn new(source_type: Option<Source>, bus_type: Option<BusType>, name:String,path:String,comment:String,source_flags:Option<SourceFlags>) -> Self {
+    pub fn new(
+        source_type: Option<Source>,
+        bus_type: Option<BusType>,
+        name: String,
+        path: String,
+        comment: String,
+        source_flags: Option<SourceFlags>,
+    ) -> Self {
         SIBlock {
             bus_type,
             flags: source_flags,
@@ -1149,13 +1278,15 @@ impl SIBlock {
         buf_reader.seek(SeekFrom::Start(next_pos)).unwrap();
         let mut data = vec![0; 3];
         buf_reader.read_exact(&mut data).unwrap();
-        let mut si_block = si_block_basic(&data, id, block_size, links.len() as u64).unwrap().1;
+        let mut si_block = si_block_basic(&data, id, block_size, links.len() as u64)
+            .unwrap()
+            .1;
 
         let mut link_name = 0;
         let mut link_comment = 0;
         let mut link_path = 0;
         // iterate over links to store name, path and comment link
-        for (i,val) in links.iter().enumerate() {
+        for (i, val) in links.iter().enumerate() {
             match i {
                 0 => link_name = *val,
                 1 => link_path = *val,
@@ -1168,17 +1299,20 @@ impl SIBlock {
         si_block.link_path = link_path as u64;
 
         // get name from name rdsdblock
-        let name_block = RDSDBlock::parse(byte_order,link_name as u64, instance)?;
-        si_block.name = String::from_utf8_lossy(&name_block.data).to_string();
-
+        if link_name > 0 {
+            let name_block = RDSDBlock::parse(byte_order, link_name as u64, instance)?;
+            si_block.name = String::from_utf8_lossy(&name_block.data).to_string();
+        }
         // get path from path rdsdblock
-        let path_block = RDSDBlock::parse(byte_order,link_path as u64, instance)?;
-        si_block.path = String::from_utf8_lossy(&path_block.data).to_string();
-
+        if link_path > 0 {
+            let path_block = RDSDBlock::parse(byte_order, link_path as u64, instance)?;
+            si_block.path = String::from_utf8_lossy(&path_block.data).to_string();
+        }
         // get comment from comment rdsdblock
-        let comment_block = RDSDBlock::parse(byte_order,link_comment as u64, instance)?;
-        si_block.comment = String::from_utf8_lossy(&comment_block.data).to_string();
-
+        if link_comment > 0 {
+            let comment_block = RDSDBlock::parse(byte_order, link_comment as u64, instance)?;
+            si_block.comment = String::from_utf8_lossy(&comment_block.data).to_string();
+        }
         // save dz block to instance's arena
         let si_id = instance.arena.new_node(Box::new(si_block));
         // add dt block to parent
@@ -1194,5 +1328,749 @@ impl SIBlock {
         buf_reader.seek(SeekFrom::Start(pos)).unwrap();
 
         Ok(())
+    }
+}
+
+#[normal_object_v4]
+#[channel_object]
+#[comment_object]
+#[basic_object]
+#[derive(Debug, PermanentBlock)]
+pub struct CNBlock {
+    pub name: String,
+    pub flags: ChannelFlags,
+    pub inval_bit_pos: u32,
+    pub max: f64,
+    pub max_ex: f64,
+    pub min: f64,
+    pub min_ex: f64,
+    pub precision: u8,
+    pub zip_reader: Option<ZippedReader>,
+    pub sd_block: Option<BlockId>,
+    pub(crate) link_ids: Vec<u64>,
+    pub(crate) link_cn_next: u64,
+    pub(crate) link_name: u64,
+    pub(crate) link_si_block: u64,
+    pub(crate) link_cc_block: u64,
+    pub(crate) link_sd_block: u64,
+    pub(crate) link_unit: u64,
+    pub(crate) link_comment: u64,
+}
+
+impl MDFObject for CNBlock {
+    fn block_size(&self) -> u64 {
+        self.block_size
+    }
+
+    fn name(&self) -> String {
+        self.name.clone()
+    }
+}
+
+impl CNBlock {
+    pub fn attachments(&self) -> Option<Vec<&ATBlock>> {
+        todo!()
+    }
+    pub fn cm_block(&self) -> Option<&CMBlock> {
+        todo!()
+    }
+    pub fn sd_block(&self) -> Option<&SDBlock> {
+        todo!()
+    }
+    pub fn si_block(&self) -> Option<&SIBlock> {
+        todo!()
+    }
+
+    pub fn new(
+        signal_type: Option<SignalType>,
+        channel_type: Option<ChannelType>,
+        name: String,
+        comment: String,
+        offset: u32,
+        add_start: u32,
+        bits_count: u32,
+        sync_type: Option<SyncType>,
+        channel_flags: ChannelFlags,
+        inval_bit_pos: u32,
+        precision: u8,
+    ) -> Self {
+        CNBlock {
+            name,
+            flags: channel_flags,
+            inval_bit_pos,
+            max: f64::NAN,
+            max_ex: f64::NAN,
+            min: f64::NAN,
+            min_ex: f64::NAN,
+            link_ids: vec![],
+            id: "CN".to_string(),
+            block_size: 160,
+            links_count: 8,
+            add_offset: (add_start + offset) / 8,
+            bit_offset: (offset % 8) as u16,
+            channel_type,
+            max_raw: f64::NAN,
+            min_raw: f64::NAN,
+            bits_count,
+            signal_type,
+            sync_type,
+            unit: "".to_string(),
+            comment,
+            block_id: None,
+            precision,
+            link_cn_next: 0,
+            link_name: 0,
+            link_si_block: 0,
+            link_cc_block: 0,
+            link_sd_block: 0,
+            link_unit: 0,
+            link_comment: 0,
+            zip_reader: None,
+            sd_block: None,
+        }
+    }
+    /// parse CNBlocks
+    pub(crate) fn parse(
+        byte_order: ByteOrder,
+        link_id: u64,
+        parent_id: BlockId,
+        instance: &mut MDFFile,
+    ) -> Result<u64, MDFErrorKind> {
+        let mut buf_reader = instance.get_buf_reader()?;
+        let pos = buf_reader.stream_position().unwrap();
+        // seek to link_id position
+        buf_reader.seek(SeekFrom::Start(link_id)).unwrap();
+        // read the block basic info
+        let (id, block_size, links, next_pos) = read_v4_basic_info(link_id, instance)?;
+
+        // go to next pos, and construct cn block(76bytes)
+        buf_reader.seek(SeekFrom::Start(next_pos)).unwrap();
+        let mut data = vec![0; 76];
+        buf_reader.read_exact(&mut data).unwrap();
+        let mut cn_block = cn_block_basic(&data, id, block_size, links.len() as u64)
+            .unwrap()
+            .1;
+
+        // get links out
+        let mut link_next_cn = 0;
+        let mut link_name = 0;
+        let mut link_si_block = 0;
+        let mut link_cc_block = 0;
+        let mut link_sd_block = 0;
+        let mut link_unit = 0;
+        let mut link_comment = 0;
+        let mut link_ids = vec![];
+        // loop links and assign links
+        for (i, val) in links.iter().enumerate() {
+            match i {
+                0 => link_next_cn = *val,
+                1 => {}
+                2 => link_name = *val,
+                3 => link_si_block = *val,
+                4 => link_cc_block = *val,
+                5 => link_sd_block = *val,
+                6 => link_unit = *val,
+                7 => link_comment = *val,
+                _ => {
+                    if *val > 0 {
+                        link_ids.push(*val as u64);
+                    }
+                }
+            }
+        }
+
+        // save links to cg_block
+        cn_block.link_ids = link_ids;
+        cn_block.link_cn_next = link_next_cn as u64;
+        cn_block.link_name = link_name as u64;
+        cn_block.link_si_block = link_si_block as u64;
+        cn_block.link_cc_block = link_cc_block as u64;
+        cn_block.link_sd_block = link_sd_block as u64;
+        cn_block.link_unit = link_unit as u64;
+        cn_block.link_comment = link_comment as u64;
+
+        // get name from name rdsdblock
+        if link_name > 0 {
+            let name_block = RDSDBlock::parse(byte_order, link_name as u64, instance)?;
+            cn_block.name = String::from_utf8_lossy(&name_block.data).to_string();
+        }
+        // get unit from unit rdsdblock
+        if link_unit > 0 {
+            let unit_block = RDSDBlock::parse(byte_order, link_unit as u64, instance)?;
+            cn_block.unit = String::from_utf8_lossy(&unit_block.data).to_string();
+        }
+        // get comment from comment rdsdblock
+        if link_comment > 0 {
+            let comment_block = RDSDBlock::parse(byte_order, link_comment as u64, instance)?;
+            cn_block.comment = String::from_utf8_lossy(&comment_block.data).to_string();
+        }
+
+        // save cn_block to instance's arena
+        let cn_id = instance.arena.new_node(Box::new(cn_block));
+        // add cn block to parent
+        parent_id
+            .checked_append(cn_id, &mut instance.arena)
+            .unwrap();
+        instance
+            .get_mut_node_by_id::<CNBlock>(cn_id)
+            .unwrap()
+            .block_id = Some(cn_id);
+
+        // parse si block
+        if link_si_block > 0 {
+            SIBlock::parse(byte_order, link_si_block as u64, cn_id, instance)?;
+        }
+        // parse cc block, and replace min,max with cc_block's min&max
+        let cc_ref = instance.get_node_by_id::<CNBlock>(cn_id).unwrap();
+        let cc_min = cc_ref.min;
+        let cc_max = cc_ref.max;
+        if link_cc_block > 0 {
+            let (_, min, max) =
+                CCBlock::parse(byte_order, link_cc_block as u64, cn_id, instance, true)?;
+            if cc_min.is_nan() && !min.is_nan() {
+                instance.get_mut_node_by_id::<CNBlock>(cn_id).unwrap().min = min;
+            }
+            if cc_max.is_nan() && !max.is_nan() {
+                instance.get_mut_node_by_id::<CNBlock>(cn_id).unwrap().max = max;
+            }
+        }
+
+        // link sd block
+        if link_sd_block > 0 {
+            // todo:
+        }
+
+        // restore stream position
+        buf_reader.seek(SeekFrom::Start(pos)).unwrap();
+        Ok(link_next_cn as u64)
+    }
+}
+
+#[normal_object_v4]
+#[basic_object]
+#[derive(Debug, PermanentBlock)]
+pub struct CMBlock {}
+
+impl MDFObject for CMBlock {
+    fn block_size(&self) -> u64 {
+        self.block_size
+    }
+
+    fn name(&self) -> String {
+        self.id.clone()
+    }
+}
+
+#[normal_object_v4]
+#[basic_object]
+#[derive(Debug, PermanentBlock)]
+pub struct SDBlock {}
+
+impl MDFObject for SDBlock {
+    fn block_size(&self) -> u64 {
+        self.block_size
+    }
+
+    fn name(&self) -> String {
+        self.id.clone()
+    }
+}
+
+#[normal_object_v4]
+#[basic_object]
+#[comment_object]
+#[channel_conversion_object]
+#[derive(Debug, PermanentBlock)]
+pub struct CCBlock {
+    pub name: String,
+    pub flags: ConversionFlags,
+    pub precision: u8,
+    pub refcount: u16,
+    pub tab_pairs: Option<Vec<(f64, f64)>>,
+    pub text_table_pairs: Option<Vec<(f64, String)>>,
+    pub text_range_pairs: Option<HashMap<String, Range<f64>>>,
+    pub(crate) link_md_comment: u64,
+    pub(crate) link_md_unit: u64,
+    pub(crate) link_tx_name: u64,
+    pub(crate) link_cc_inverse: u64,
+}
+
+impl MDFObject for CCBlock {
+    fn block_size(&self) -> u64 {
+        self.block_size
+    }
+
+    fn name(&self) -> String {
+        self.name.clone()
+    }
+}
+
+impl CCBlock {
+    pub fn new(conversion_type: Option<ConversionType>, unit: String, min: f64, max: f64) -> Self {
+        let mut flags = ConversionFlags::None;
+        let mut max_ = f64::NAN;
+        let mut min_ = f64::NAN;
+        if !min.is_nan() && !max.is_nan() {
+            flags |= ConversionFlags::LimitRangeValid;
+            max_ = max;
+            min_ = min;
+        }
+        CCBlock {
+            name: Default::default(),
+            flags: flags,
+            precision: 0,
+            refcount: 0,
+            id: "CC".to_string(),
+            block_size: 80,
+            links_count: 4,
+            block_id: None,
+            conversion_type,
+            default_text: Default::default(),
+            formula: Default::default(),
+            inv_ccblock: None,
+            max: max_,
+            min: min_,
+            params: None,
+            tab_size: 0,
+            unit,
+            comment: Default::default(),
+            link_md_comment: 0,
+            link_md_unit: 0,
+            link_tx_name: 0,
+            link_cc_inverse: 0,
+            tab_pairs: None,
+            text_table_pairs: None,
+            text_range_pairs: None,
+        }
+    }
+    // parse cc block
+    pub(crate) fn parse(
+        byte_order: ByteOrder,
+        link_id: u64,
+        parent_id: BlockId,
+        instance: &mut MDFFile,
+        add_as_child: bool,
+    ) -> Result<(BlockId, f64, f64), MDFErrorKind> {
+        let mut buf_reader = instance.get_buf_reader()?;
+        let pos = buf_reader.stream_position().unwrap();
+        // seek to link_id position
+        buf_reader.seek(SeekFrom::Start(link_id)).unwrap();
+        // read the block basic info
+        let (id, block_size, links, next_pos) = read_v4_basic_info(link_id, instance)?;
+
+        // go to next pos, and construct cc block(24bytes)
+        buf_reader.seek(SeekFrom::Start(next_pos)).unwrap();
+        let mut data = vec![0; 24];
+        buf_reader.read_exact(&mut data).unwrap();
+        let mut cc_block = cc_block_basic(&data, id, block_size, links.len() as u64)
+            .unwrap()
+            .1;
+
+        // get links out
+        let mut link_text_name = 0;
+        let mut link_md_unit = 0;
+        let mut link_md_comment = 0;
+        let mut link_cc_inverse = 0;
+        // loop links and assign links
+        for (i, val) in links.iter().enumerate() {
+            match i {
+                0 => link_text_name = *val,
+                1 => link_md_unit = *val,
+                2 => link_md_comment = *val,
+                3 => link_cc_inverse = *val,
+                _ => {}
+            }
+        }
+        let min = cc_block.min;
+        let max = cc_block.max;
+        // save links to cg_block
+        cc_block.link_tx_name = link_text_name as u64;
+        cc_block.link_md_unit = link_md_unit as u64;
+        cc_block.link_md_comment = link_md_comment as u64;
+        cc_block.link_cc_inverse = link_cc_inverse as u64;
+
+        // get name from name rdsdblock
+        if link_text_name > 0 {
+            let name_block = RDSDBlock::parse(byte_order, link_text_name as u64, instance)?;
+            cc_block.name = String::from_utf8_lossy(&name_block.data).to_string();
+        }
+        // get unit from unit rdsdblock
+        if link_md_unit > 0 {
+            let unit_block = RDSDBlock::parse(byte_order, link_md_unit as u64, instance)?;
+            cc_block.unit = String::from_utf8_lossy(&unit_block.data).to_string();
+        }
+        // get comment from comment rdsdblock
+        if link_md_comment > 0 {
+            let comment_block = RDSDBlock::parse(byte_order, link_md_comment as u64, instance)?;
+            cc_block.comment = String::from_utf8_lossy(&comment_block.data).to_string();
+        }
+        let pos_pos = buf_reader.stream_position().unwrap();
+        cc_block.parse_params(pos_pos, instance, &links)?;
+
+        // save cc_block to instance's arena
+        let cc_id = instance.arena.new_node(Box::new(cc_block));
+
+        if add_as_child {
+            // add cc block to parent
+            parent_id
+                .checked_append(cc_id, &mut instance.arena)
+                .unwrap();
+        }
+        instance
+            .get_mut_node_by_id::<CCBlock>(cc_id)
+            .unwrap()
+            .block_id = Some(cc_id);
+
+        // parse inverse cc block
+        if link_cc_inverse > 0 {
+            let (inv_cc_id, _, _) =
+                CCBlock::parse(byte_order, link_cc_inverse as u64, cc_id, instance, false)?;
+            instance
+                .get_mut_node_by_id::<CCBlock>(cc_id)
+                .unwrap()
+                .inv_ccblock = Some(inv_cc_id);
+        }
+
+        // restore stream position
+        buf_reader.seek(SeekFrom::Start(pos)).unwrap();
+
+        Ok((cc_id, min, max))
+    }
+
+    fn parse_params(
+        &mut self,
+        position: u64,
+        instance: &mut MDFFile,
+        links: &Vec<i64>,
+    ) -> Result<(), MDFErrorKind> {
+        let mut buf_reader = instance.get_buf_reader().unwrap();
+        buf_reader.seek(SeekFrom::Start(position)).unwrap();
+        match self.conversion_type {
+            Some(conv_type) => {
+                match conv_type {
+                    ConversionType::ParametricLinear | ConversionType::Rational => {
+                        if self.tab_size > 0 {
+                            let mut buf = vec![0; (self.tab_size as usize) * 8];
+                            buf_reader.read_exact(&mut buf).unwrap();
+                            let mut params = read_n_le_f64(&buf, self.tab_size as usize).unwrap().1;
+                            params = transform_params(params, Some(conv_type));
+                            self.params = Some(params);
+                        }
+                    }
+                    ConversionType::TabInt | ConversionType::Tab => {
+                        let mut tab_pairs = Vec::new();
+                        for _ in 0..(self.tab_size / 2) {
+                            let mut buf = [0; 16];
+                            buf_reader.read_exact(&mut buf).unwrap();
+                            let key_var = read_n_le_f64(&buf, 2).unwrap().1;
+                            tab_pairs.push((key_var[0], key_var[1]));
+                        }
+                        self.tab_pairs = Some(tab_pairs);
+                    }
+                    ConversionType::TextFormula => {
+                        if links.len() > 4 {
+                            let link_formula = links[4];
+                            if link_formula > 0 {
+                                let formula_block = RDSDBlock::parse(
+                                    ByteOrder::LittleEndian,
+                                    link_formula as u64,
+                                    instance,
+                                )?;
+                                self.formula =
+                                    String::from_utf8_lossy(&formula_block.data).to_string();
+                            }
+                        }
+                    }
+                    ConversionType::TextTable => {
+                        let mut text_table_pairs = Vec::new();
+                        let mut vec_f64 = Vec::with_capacity(self.tab_size as usize);
+                        for _ in 0..self.tab_size {
+                            let mut buf = [0; 8];
+                            buf_reader.read_exact(&mut buf).unwrap();
+                            vec_f64.push(read_le_f64(&buf).unwrap().1);
+                        }
+                        let mut vec_str = Vec::with_capacity(links.len() - 4);
+                        for i in 0..(links.len() - 4) {
+                            let link_address = links[4 + i];
+                            let val_block = RDSDBlock::parse(
+                                ByteOrder::LittleEndian,
+                                link_address as u64,
+                                instance,
+                            )?;
+                            vec_str.push(String::from_utf8_lossy(&val_block.data).to_string());
+                        }
+                        for i in 0..self.tab_size {
+                            text_table_pairs
+                                .push((vec_f64[i as usize], vec_str[i as usize].clone()));
+                        }
+                        // set default text
+                        self.default_text = vec_str[vec_str.len() - 1].clone();
+                        self.text_table_pairs = Some(text_table_pairs);
+                    }
+                    ConversionType::TextRange => {
+                        let mut text_range_pairs = HashMap::new();
+                        let mut n = 0;
+                        let mut idx = 0;
+                        let mut vec_range = Vec::new();
+                        while n < self.tab_size {
+                            let mut buf = vec![0; 2 * 8];
+                            buf_reader.read_exact(&mut buf).unwrap();
+                            let min_max = read_n_le_f64(&buf, 2).unwrap().1;
+                            let range = Range {
+                                start: min_max[0],
+                                end: min_max[2],
+                            };
+                            vec_range.push(range);
+                            n += 2;
+                            idx += 1;
+                        }
+                        let mut vec_str = Vec::with_capacity(links.len() - 4);
+                        for i in 0..(links.len() - 4) {
+                            let link_address = links[4 + i];
+                            let val_block = RDSDBlock::parse(
+                                ByteOrder::LittleEndian,
+                                link_address as u64,
+                                instance,
+                            )?;
+                            vec_str.push(String::from_utf8_lossy(&val_block.data).to_string());
+                        }
+                        for i in 0..(links.len() - 4 - 1) {
+                            text_range_pairs
+                                .insert(vec_str[i as usize].clone(), vec_range[i as usize].clone());
+                        }
+                        self.text_range_pairs = Some(text_range_pairs);
+                        // set default text
+                        self.default_text = vec_str[vec_str.len() - 1].clone();
+                    }
+                    _ => {
+                        return Err(MDFErrorKind::CCBlockError(
+                            "Doesn't supported thid kind of conversion type!".into(),
+                        ));
+                    }
+                }
+            }
+            None => {}
+        }
+        Ok(())
+    }
+}
+
+#[normal_object_v4]
+#[comment_object]
+#[basic_object]
+#[derive(Debug, Clone, PermanentBlock)]
+pub struct FHBlock {
+    pub dst_offset: i16,
+    pub flags: Option<TimeFlagsType>,
+    pub timestamp: u64,
+    pub utc_offset: i16,
+    pub(crate) link_fh_next: u64,
+    pub(crate) link_comment: u64,
+}
+
+impl MDFObject for FHBlock {
+    fn block_size(&self) -> u64 {
+        self.block_size
+    }
+
+    fn name(&self) -> String {
+        self.id.clone()
+    }
+}
+
+impl FHBlock {
+    pub fn new(
+        username: String,
+        text: String,
+        timestamp: u64,
+        utc_offset: i16,
+        dst_offset: i16,
+        flags: Option<TimeFlagsType>,
+    ) -> Self {
+        let comment = format!("<FHcomment>\r\n<TX>{0}</TX>\r\n<tool_id>asammdf rust crate</tool_id>\r\n<tool_vendor>H2O2.IO</tool_vendor>\r\n<tool_version>{1}</tool_version>\r\n<user_name>{2}</user_name>\r\n<common_properties>\r\n<e name=\"asammdf rust crate\">Version {1}</e>\r\n</common_properties>\r\n</FHcomment>", text, env!("CARGO_PKG_VERSION"), username);
+        Self {
+            dst_offset,
+            flags: Some(TimeFlagsType::LocalTime),
+            timestamp,
+            utc_offset,
+            link_fh_next: 0,
+            id: "FH".to_string(),
+            block_size: 56,
+            links_count: 2,
+            comment,
+            block_id: None,
+            link_comment: 0,
+        }
+    }
+
+    // parse fh block
+    pub(crate) fn parse(
+        byte_order: ByteOrder,
+        link_id: u64,
+        parent_id: BlockId,
+        instance: &mut MDFFile,
+        add_as_child: bool,
+    ) -> Result<u64, MDFErrorKind> {
+        let mut buf_reader = instance.get_buf_reader()?;
+        let pos = buf_reader.stream_position().unwrap();
+        // seek to link_id position
+        buf_reader.seek(SeekFrom::Start(link_id)).unwrap();
+        // read the block basic info
+        let (id, block_size, links, next_pos) = read_v4_basic_info(link_id, instance)?;
+
+        // go to next pos, and construct fh block(16bytes)
+        buf_reader.seek(SeekFrom::Start(next_pos)).unwrap();
+        let mut data = vec![0; 16];
+        buf_reader.read_exact(&mut data).unwrap();
+        let mut fh_block = fh_block_basic(&data, id, block_size, links.len() as u64)
+            .unwrap()
+            .1;
+
+        // get links out
+        let mut link_comment = 0;
+        let mut link_fh_next = 0;
+        // loop links and assign links
+        for (i, val) in links.iter().enumerate() {
+            match i {
+                0 => link_fh_next = *val,
+                1 => link_comment = *val,
+                _ => {}
+            }
+        }
+        // save links to fh_block
+        fh_block.link_comment = link_comment as u64;
+        fh_block.link_fh_next = link_fh_next as u64;
+
+        // get comment from comment rdsdblock
+        if link_comment > 0 {
+            let comment_block = RDSDBlock::parse(byte_order, link_comment as u64, instance)?;
+            fh_block.comment = String::from_utf8_lossy(&comment_block.data).to_string();
+        }
+
+        // store to arena
+        let fh_id = instance.arena.new_node(Box::new(fh_block));
+        // add cc block to parent
+        parent_id
+            .checked_append(fh_id, &mut instance.arena)
+            .unwrap();
+        instance
+            .get_mut_node_by_id::<FHBlock>(fh_id)
+            .unwrap()
+            .block_id = Some(fh_id);
+
+        // restore stream position
+        buf_reader.seek(SeekFrom::Start(pos)).unwrap();
+
+        Ok(link_fh_next as u64)
+    }
+}
+
+#[normal_object_v4]
+#[comment_object]
+#[basic_object]
+#[derive(Debug, Clone, PermanentBlock)]
+pub struct EVBlock {
+    pub cause: Option<Cause>,
+    pub creator_index: u16,
+    pub flags: Option<EventFlags>,
+    pub range: Option<RangeType>,
+    pub sync: Option<SyncType>,
+    pub sync_base_val: i64,
+    pub sync_factor: f64,
+    pub evt_type: Option<Event>,
+    pub(crate) link_next_ev: u64,
+    pub(crate) ref_datas: Vec<u64>,
+}
+
+impl MDFObject for EVBlock {
+    fn block_size(&self) -> u64 {
+        self.block_size
+    }
+
+    fn name(&self) -> String {
+        self.id.clone()
+    }
+}
+
+impl EVBlock {
+    pub fn new() -> Self {
+        EVBlock {
+            cause: None,
+            creator_index: 0,
+            flags: None,
+            range: None,
+            sync: None,
+            sync_base_val: 0,
+            sync_factor: 0.0,
+            evt_type: None,
+            link_next_ev: 0,
+            id: "EV".to_string(),
+            block_size: 0,
+            links_count: 0,
+            comment: Default::default(),
+            block_id: None,
+            ref_datas: vec![],
+        }
+    }
+
+    // parse ev block
+    pub(crate) fn parse(
+        byte_order: ByteOrder,
+        link_id: u64,
+        parent_id: BlockId,
+        instance: &mut MDFFile,
+        add_as_child: bool,
+    ) -> Result<u64, MDFErrorKind> {
+        let mut buf_reader = instance.get_buf_reader()?;
+        let pos = buf_reader.stream_position().unwrap();
+        // seek to link_id position
+        buf_reader.seek(SeekFrom::Start(link_id)).unwrap();
+        // read the block basic info
+        let (id, block_size, links, next_pos) = read_v4_basic_info(link_id, instance)?;
+
+        // go to next pos, and construct fh block(16bytes)
+        buf_reader.seek(SeekFrom::Start(next_pos)).unwrap();
+        let mut data = vec![0; 16];
+        buf_reader.read_exact(&mut data).unwrap();
+        let mut fh_block = fh_block_basic(&data, id, block_size, links.len() as u64)
+            .unwrap()
+            .1;
+
+        // get links out
+        let mut link_comment = 0;
+        let mut link_fh_next = 0;
+        // loop links and assign links
+        for (i, val) in links.iter().enumerate() {
+            match i {
+                0 => link_fh_next = *val,
+                1 => link_comment = *val,
+                _ => {}
+            }
+        }
+        // save links to fh_block
+        fh_block.link_comment = link_comment as u64;
+        fh_block.link_fh_next = link_fh_next as u64;
+
+        // get comment from comment rdsdblock
+        if link_comment > 0 {
+            let comment_block = RDSDBlock::parse(byte_order, link_comment as u64, instance)?;
+            fh_block.comment = String::from_utf8_lossy(&comment_block.data).to_string();
+        }
+
+        // store to arena
+        let fh_id = instance.arena.new_node(Box::new(fh_block));
+        // add cc block to parent
+        parent_id
+            .checked_append(fh_id, &mut instance.arena)
+            .unwrap();
+        instance
+            .get_mut_node_by_id::<FHBlock>(fh_id)
+            .unwrap()
+            .block_id = Some(fh_id);
+
+        // restore stream position
+        buf_reader.seek(SeekFrom::Start(pos)).unwrap();
+
+        Ok(link_fh_next as u64)
     }
 }

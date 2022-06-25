@@ -243,3 +243,26 @@ fn impl_permanent_block_derive(ast: &DeriveInput) -> TokenStream {
     };
     gen.into()
 }
+
+#[proc_macro_attribute]
+pub fn channel_conversion_object(_args: TokenStream, input:TokenStream) -> TokenStream{
+    let mut item_struct = parse_macro_input!(input as ItemStruct);
+    let _ = parse_macro_input!(_args as parse::Nothing);
+
+    if let syn::Fields::Named(ref mut fields) = item_struct.fields {
+        fields.named.push(get_field_def(quote! { pub conversion_type: Option<ConversionType> }));
+        fields.named.push(get_field_def(quote! { pub default_text: String}));
+        fields.named.push(get_field_def(quote! { pub formula: String}));
+        fields.named.push(get_field_def(quote! { pub inv_ccblock: Option<BlockId>}));
+        fields.named.push(get_field_def(quote! { pub max: f64}));
+        fields.named.push(get_field_def(quote! { pub min: f64}));
+        fields.named.push(get_field_def(quote! { pub params: Option<Vec<f64>>}));
+        fields.named.push(get_field_def(quote! { pub tab_size: u16}));
+        fields.named.push(get_field_def(quote! { pub unit: String}));
+    }
+
+    return quote! {
+        #item_struct
+    }
+    .into();
+}

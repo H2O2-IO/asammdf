@@ -1,6 +1,11 @@
-use crate::ByteOrder;
+use core::time;
 
-use super::{DGBlock, DLBlock, DTBlock, HDBlock, HLBlock, IDBlock, DZBlock, SIBlock};
+use crate::{ByteOrder, ConversionType};
+
+use super::{
+    CCBlock, CGBlock, CNBlock, ChannelFlags, ConversionFlags, DGBlock, DLBlock, DTBlock, DZBlock,
+    FHBlock, HDBlock, HLBlock, IDBlock, SIBlock,
+};
 use chrono::Local;
 use nom::bytes::complete::take;
 use nom::number::complete::{le_f64, le_i16, le_i64, le_u16, le_u32, le_u64, le_u8};
@@ -175,29 +180,15 @@ pub(crate) fn dz_block_basic(
     block_size: i64,
     link_count: u64,
 ) -> IResult<&[u8], DZBlock> {
-    let (input, (
-        block_type_bytes,
-        zip_type,
-        _,
-        zip_parameter,
-        size,
-        length,
-    )) =
-        tuple((
-            take(2u32),
-            le_u8,
-            take(1u32),
-            le_u32,
-            le_i64,
-            le_u64,
-    ))(input)?;
+    let (input, (block_type_bytes, zip_type, _, zip_parameter, size, length)) =
+        tuple((take(2u32), le_u8, take(1u32), le_u32, le_i64, le_u64))(input)?;
 
     // conver zip_type
     let zip_type = (zip_type as u32).try_into().map_or(None, |x| Some(x));
     let block_type = String::from_utf8_lossy(block_type_bytes).to_string();
 
     // prepare basic info
-    let mut dz_block = DZBlock::new(length,size,zip_type,zip_parameter,Some(block_type));
+    let mut dz_block = DZBlock::new(length, size, zip_type, zip_parameter, Some(block_type));
     dz_block.id = id;
     dz_block.block_size = block_size as u64;
     dz_block.links_count = link_count;
@@ -212,26 +203,229 @@ pub(crate) fn si_block_basic(
     block_size: i64,
     link_count: u64,
 ) -> IResult<&[u8], SIBlock> {
-    let (input, (
-        source_type,
-        bus_type,
-        flags,
-    )) =
-        tuple((
-            le_u8,
-            le_u8,
-            le_u8,
-        ))(input)?;
+    let (input, (source_type, bus_type, flags)) = tuple((le_u8, le_u8, le_u8))(input)?;
     // convert source_type,bus_type,flags to coresponding enum
     let source_type = (source_type as u32).try_into().map_or(None, |x| Some(x));
     let bus_type = (bus_type as u32).try_into().map_or(None, |x| Some(x));
     let flags = (flags as u32).try_into().map_or(None, |x| Some(x));
 
     // prepare basic info
-    let mut si_block = SIBlock::new(source_type, bus_type, Default::default(),Default::default(),Default::default(),flags);
+    let mut si_block = SIBlock::new(
+        source_type,
+        bus_type,
+        Default::default(),
+        Default::default(),
+        Default::default(),
+        flags,
+    );
     si_block.id = id;
     si_block.block_size = block_size as u64;
     si_block.links_count = link_count;
 
     Ok((input, si_block))
+}
+
+/// CGBlock basic info, fix length(32bytes)
+pub(crate) fn cg_block_basic(
+    input: &[u8],
+    id: String,
+    block_size: i64,
+    link_count: u64,
+) -> IResult<&[u8], CGBlock> {
+    let (
+        input,
+        (record_id, record_count, channel_group_flags, path_separator, _, record_size, inval_size),
+    ) = tuple((le_u64, le_u64, le_u16, le_u16, take(4u32), le_u32, le_u32))(input)?;
+
+    // prepare basic info
+    let mut cg_block = CGBlock::new(Default::default());
+    cg_block.id = id;
+    cg_block.block_size = block_size as u64;
+    cg_block.links_count = link_count;
+    cg_block.record_id = record_id;
+    cg_block.record_count = record_count;
+    // conver channel_groups_flags to coresponding enum
+    let channel_group_flags = (channel_group_flags as u32)
+        .try_into()
+        .map_or(None, |x| Some(x));
+    cg_block.flags = channel_group_flags;
+    cg_block.path_separator = std::char::from_u32(path_separator as u32).unwrap();
+    cg_block.record_size = record_size;
+    cg_block.inval_size = inval_size;
+
+    Ok((input, cg_block))
+}
+
+/// CNBlock basic info, fix length(76bytes)
+pub(crate) fn cn_block_basic(
+    input: &[u8],
+    id: String,
+    block_size: i64,
+    link_count: u64,
+) -> IResult<&[u8], CNBlock> {
+    let (
+        input,
+        (
+            channel_type,
+            sync_type,
+            signal_type,
+            bit_offset,
+            add_offset,
+            bits_count,
+            channel_flags,
+            inval_bit_pos,
+            precision,
+            _,
+            min_raw,
+            max_raw,
+            min,
+            max,
+            min_ex,
+            max_ex,
+        ),
+    ) = tuple((
+        le_u8,
+        le_u8,
+        le_u8,
+        le_u8,
+        le_u32,
+        le_u32,
+        le_u32,
+        le_u32,
+        le_u8,
+        take(3u32),
+        le_f64,
+        le_f64,
+        le_f64,
+        le_f64,
+        le_f64,
+        le_f64,
+    ))(input)?;
+    let channel_type = (channel_type as u32).try_into().map_or(None, |x| Some(x));
+    let sync_type = (sync_type as u32).try_into().map_or(None, |x| Some(x));
+    let signal_type = (signal_type as u32).try_into().map_or(None, |x| Some(x));
+
+    // prepare basic info
+    let mut cn_block = CNBlock::new(
+        signal_type,
+        channel_type,
+        Default::default(),
+        Default::default(),
+        0,
+        0,
+        bits_count,
+        sync_type,
+        ChannelFlags::from_bits_truncate(channel_flags),
+        inval_bit_pos,
+        precision,
+    );
+    cn_block.id = id;
+    cn_block.block_size = block_size as u64;
+    cn_block.links_count = link_count;
+    cn_block.bit_offset = bit_offset as u16;
+    cn_block.add_offset = add_offset;
+    if (cn_block.flags & ChannelFlags::ValueRangeValid) > ChannelFlags::None {
+        cn_block.min_raw = min_raw;
+        cn_block.max_raw = max_raw;
+    }
+    if (cn_block.flags & ChannelFlags::LimitRangeValid) > ChannelFlags::None {
+        cn_block.min = min;
+        cn_block.max = max;
+    }
+    if (cn_block.flags & ChannelFlags::ExtendedLimitRangeValid) > ChannelFlags::None {
+        cn_block.min_ex = min_ex;
+        cn_block.max_ex = max_ex;
+    }
+
+    Ok((input, cn_block))
+}
+
+/// CCBlock basic info, fix length(24bytes)
+pub(crate) fn cc_block_basic(
+    input: &[u8],
+    id: String,
+    block_size: i64,
+    link_count: u64,
+) -> IResult<&[u8], CCBlock> {
+    let (input, (conversion_type, precision, conversion_flags, ref_count, tab_size, min, max)) =
+        tuple((le_u8, le_u8, le_u16, le_u16, le_u16, le_f64, le_f64))(input)?;
+    let flags = ConversionFlags::from_bits_truncate(conversion_flags);
+    let mut max_ = f64::NAN;
+    let mut min_ = f64::NAN;
+    if (flags & ConversionFlags::LimitRangeValid) > ConversionFlags::None {
+        max_ = max;
+        min_ = min;
+    }
+    let mut conv_type = None;
+    match conversion_type {
+        0 => {
+            conv_type = None;
+        }
+        1 => {
+            conv_type = Some(ConversionType::ParametricLinear);
+        }
+        2 => {
+            conv_type = Some(ConversionType::Rational);
+        }
+        3 => {
+            conv_type = Some(ConversionType::TextFormula);
+        }
+        4 => {
+            conv_type = Some(ConversionType::TabInt);
+        }
+        5 => {
+            conv_type = Some(ConversionType::Tab);
+        }
+        6 => {
+            conv_type = Some(ConversionType::TabRange);
+        }
+        7 => {
+            conv_type = Some(ConversionType::TextTable);
+        }
+        8 => {
+            conv_type = Some(ConversionType::TextRange);
+        }
+        9 => {
+            conv_type = Some(ConversionType::TextToValue);
+        }
+        10 => {
+            conv_type = Some(ConversionType::TextToText);
+        }
+        _ => {
+            conv_type = None;
+        }
+    }
+
+    // prepare basic info
+    let mut cc_block = CCBlock::new(conv_type, Default::default(), min_, max_);
+    cc_block.id = id;
+    cc_block.block_size = block_size as u64;
+    cc_block.links_count = link_count;
+
+    Ok((input, cc_block))
+}
+
+/// FHBlock basic info, fix length(16bytes)
+pub(crate) fn fh_block_basic(
+    input: &[u8],
+    id: String,
+    block_size: i64,
+    link_count: u64,
+) -> IResult<&[u8], FHBlock> {
+    let (input, (timestamp, utc_offset, dst_offset, flags, _)) =
+        tuple((le_u64, le_i16, le_i16, le_u8, take(3u32)))(input)?;
+    // convert flags to enum TimeFlagsType
+    let flags = (flags as u32).try_into().map_or(None, |x| Some(x));
+
+    // prepare basic info
+    let mut fh_block = FHBlock::new(
+        Default::default(),
+        Default::default(),
+        timestamp,
+        utc_offset,
+        dst_offset,
+        flags,
+    );
+
+    Ok((input, fh_block))
 }

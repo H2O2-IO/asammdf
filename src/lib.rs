@@ -130,7 +130,7 @@ pub enum RecordIDType {
     BeforeAndAfter8Bit = 255,
 }
 }
-
+enum_u32_convert! {
 #[derive(Clone, Copy, Debug)]
 pub enum SignalType {
     UIntLE,
@@ -149,7 +149,7 @@ pub enum SignalType {
     CANOPENData,
     CANOPENTime,
 }
-
+}
 impl SignalType {
     pub fn from_u16(value: u16, byte_order: ByteOrder) -> Option<SignalType> {
         match value {
@@ -187,14 +187,15 @@ impl SignalType {
     }
 }
 
+enum_u32_convert! {
 #[derive(Clone, Copy, Debug)]
 pub enum SyncType {
-    Time,
+    Time=1,
     Angle,
     Distance,
     Index,
 }
-
+}
 enum_u32_convert! {
 #[derive(Clone, Copy, Debug)]
 pub enum TimeFlagsType {

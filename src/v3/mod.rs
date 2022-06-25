@@ -3,8 +3,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
 
 use asammdf_derive::{
-    basic_object, channel_group_object, channel_object, comment_object, data_group_object,
-    id_object, mdf_object, normal_object_v3,
+    basic_object, channel_conversion_object, channel_group_object, channel_object, comment_object,
+    data_group_object, id_object, mdf_object, normal_object_v3,
 };
 
 use asammdf_derive::{IDObject, MDFObject, PermanentBlock};
@@ -110,7 +110,7 @@ impl IDBlock {
 #[comment_object]
 #[normal_object_v3]
 #[basic_object]
-#[derive(Debug, Clone, PermanentBlock)]
+#[derive(Debug, PermanentBlock)]
 pub struct HDBlock {
     pub author: String,
     pub date: String,
@@ -259,7 +259,7 @@ impl<'a> HDObject<'a, DGBlock> for HDBlock {
 #[comment_object]
 #[data_group_object]
 #[basic_object]
-#[derive(Debug, Clone, PermanentBlock)]
+#[derive(Debug, PermanentBlock)]
 pub struct DGBlock {
     pub(crate) link_data_records: u32,
     pub(crate) link_next_cgblock: u32,
@@ -341,7 +341,7 @@ impl DGBlock {
 #[channel_group_object]
 #[comment_object]
 #[basic_object]
-#[derive(Debug, Clone, PermanentBlock)]
+#[derive(Debug, PermanentBlock)]
 pub struct CGBlock {
     pub record_id: u16,
     pub(crate) link_cg_comment: u32,
@@ -485,7 +485,7 @@ impl<'a> CGObject<'a, CNBlock, DGBlock, SRBlock> for CGBlock {
 #[channel_object]
 #[comment_object]
 #[basic_object]
-#[derive(Debug, Clone, PermanentBlock)]
+#[derive(Debug, PermanentBlock)]
 pub struct CNBlock {
     pub description: String,
     pub display_name: String,
@@ -546,7 +546,7 @@ impl CNBlock {
             min_raw: f64::NAN,
             bits_count,
             signal_type: Some(signal_type),
-            sync_type: None,
+            sync_type: Some(SyncType::Time),
             unit: Default::default(),
             comment: Default::default(),
             block_id: None,
@@ -704,7 +704,7 @@ impl<'a> CNObject<'a, CCBlock, CDBlock, CEBlock, CGBlock> for CNBlock {
 }
 
 #[normal_object_v3]
-#[derive(Debug, Clone, PermanentBlock)]
+#[derive(Debug, PermanentBlock)]
 pub struct SRBlock {
     /// Length of time interval(/s)
     pub time_interval_len: f64,
@@ -762,22 +762,14 @@ impl SRObject for SRBlock {}
 
 #[normal_object_v3]
 #[comment_object]
-#[derive(Debug, Clone, PermanentBlock)]
+#[channel_conversion_object]
+#[derive(Debug, PermanentBlock)]
 pub struct CCBlock {
-    pub conversion_type: Option<ConversionType>,
     pub date: Option<DateType>,
-    pub default_text: String,
-    pub foumula: String,
-    pub inv_ccblock: Option<BlockId>,
     pub tab_pairs: Option<Vec<(f64, f64)>>,
     pub text_table_pairs: Option<Vec<(f64, String)>>,
     pub text_range_pairs: Option<HashMap<String, Range<f64>>>,
-    pub max: f64,
-    pub min: f64,
-    pub params: Option<Vec<f64>>,
-    pub tab_size: u16,
     pub time: Option<TimeType>,
-    pub unit: String,
 }
 
 impl MDFObject for CCBlock {
@@ -796,7 +788,7 @@ impl CCBlock {
             conversion_type: conversion_type,
             date: None,
             default_text: Default::default(),
-            foumula: Default::default(),
+            formula: Default::default(),
             inv_ccblock: None,
             tab_pairs: None,
             text_table_pairs: None,
@@ -868,7 +860,7 @@ impl CCBlock {
                     ConversionType::TextFormula => {
                         let mut buf = vec![0; self.tab_size as usize];
                         buf_reader.read_exact(&mut buf).unwrap();
-                        self.foumula = read_str(&buf, self.tab_size as u32).unwrap().1;
+                        self.formula = read_str(&buf, self.tab_size as u32).unwrap().1;
                     }
                     ConversionType::TextTable => {
                         let mut text_table_pairs = Vec::new();
@@ -1096,7 +1088,7 @@ impl TimeType {
 
 /// Some extension blocks
 #[normal_object_v3]
-#[derive(Debug, Clone, PermanentBlock)]
+#[derive(Debug, PermanentBlock)]
 pub struct CEBlock {
     pub dim: Option<DimType>,
     pub extension_type: Option<ExtensionType>,
@@ -1200,7 +1192,7 @@ impl DimType {
 
 /// Dependency block
 #[normal_object_v3]
-#[derive(Debug, Clone, PermanentBlock)]
+#[derive(Debug, PermanentBlock)]
 pub struct CDBlock {
     pub dependency_type: u16,
     pub dependencies: Option<Vec<DependencyType>>,
@@ -1274,7 +1266,7 @@ impl VectorCANType {
 /// Trigger Block
 #[normal_object_v3]
 #[comment_object]
-#[derive(Debug, Clone, PermanentBlock)]
+#[derive(Debug, PermanentBlock)]
 pub struct TRBlock {
     pub trigger_events: Vec<TriggerEvent>,
     pub(crate) link_comment: u32,
@@ -1359,7 +1351,7 @@ impl TriggerEvent {
 ///
 /// For convenience when writing, currently, we only store TXBlock as a String, not as child of parent block.
 #[normal_object_v3]
-#[derive(Debug, Clone, PermanentBlock)]
+#[derive(Debug, Clone)]
 pub struct TXBlock {
     /// a string with a eol(`\0`) char, block size include this eol char.
     pub text: String,
