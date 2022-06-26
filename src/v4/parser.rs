@@ -3,8 +3,9 @@ use core::time;
 use crate::{ByteOrder, ConversionType};
 
 use super::{
-    CCBlock, CGBlock, CNBlock, ChannelFlags, ConversionFlags, DGBlock, DLBlock, DTBlock, DZBlock,
-    FHBlock, HDBlock, HLBlock, IDBlock, SIBlock,
+    ATBlock, AttachmentFlags, CCBlock, CGBlock, CHBlock, CNBlock, ChannelFlags, ConversionFlags,
+    DGBlock, DLBlock, DTBlock, DZBlock, EVBlock, FHBlock, HDBlock, HLBlock, IDBlock, SIBlock,
+    SRBlock,
 };
 use chrono::Local;
 use nom::bytes::complete::take;
@@ -426,6 +427,133 @@ pub(crate) fn fh_block_basic(
         dst_offset,
         flags,
     );
+    fh_block.id = id;
+    fh_block.block_size = block_size as u64;
+    fh_block.links_count = link_count;
 
     Ok((input, fh_block))
+}
+
+/// EVBlock basic info, fix length(32bytes)
+pub(crate) fn ev_block_basic(
+    input: &[u8],
+    id: String,
+    block_size: i64,
+    link_count: u64,
+) -> IResult<&[u8], EVBlock> {
+    let (
+        input,
+        (
+            evt_type,
+            sync_type,
+            range,
+            cause_type,
+            flags,
+            _,
+            creator_index,
+            sync_basevalue,
+            sync_factor,
+        ),
+    ) = tuple((
+        le_u8,
+        le_u8,
+        le_u8,
+        le_u8,
+        le_u8,
+        take(9u32),
+        le_u16,
+        le_i64,
+        le_f64,
+    ))(input)?;
+    // convert flags to enum
+    let evt_type = (evt_type as u32).try_into().map_or(None, |x| Some(x));
+    let sync_type = (sync_type as u32).try_into().map_or(None, |x| Some(x));
+    let cause_type = (cause_type as u32).try_into().map_or(None, |x| Some(x));
+    let range = (range as u32).try_into().map_or(None, |x| Some(x));
+    let flags = (flags as u32).try_into().map_or(None, |x| Some(x));
+
+    // prepare basic info
+    let mut ev_block = EVBlock::new();
+    ev_block.id = id;
+    ev_block.block_size = block_size as u64;
+    ev_block.links_count = link_count;
+
+    ev_block.evt_type = evt_type;
+    ev_block.sync = sync_type;
+    ev_block.range = range;
+    ev_block.cause = cause_type;
+    ev_block.flags = flags;
+    ev_block.creator_index = creator_index;
+    ev_block.sync_base_val = sync_basevalue;
+    ev_block.sync_factor = sync_factor;
+
+    Ok((input, ev_block))
+}
+
+/// ATBlock basic info, fix length(4bytes)
+pub(crate) fn at_block_basic(
+    input: &[u8],
+    id: String,
+    block_size: i64,
+    link_count: u64,
+) -> IResult<&[u8], ATBlock> {
+    let (input, (attachment_flags, creator_index, _)) = tuple((le_u16, le_u16, le_u32))(input)?;
+    // convert flags to enum
+    let attachment_flags = AttachmentFlags::from_bits_truncate(attachment_flags);
+
+    // prepare basic info
+    let mut at_block = ATBlock::new();
+    at_block.id = id;
+    at_block.block_size = block_size as u64;
+    at_block.links_count = link_count;
+    at_block.attachment_flags = attachment_flags;
+    at_block.creator_index = creator_index;
+
+    Ok((input, at_block))
+}
+
+/// CHBlock basic info, fix length(8bytes)
+pub(crate) fn ch_block_basic(
+    input: &[u8],
+    id: String,
+    block_size: i64,
+    link_count: u64,
+) -> IResult<&[u8], (u32, CHBlock)> {
+    let (input, (dependencies_count, hierarchy_type, _)) =
+        tuple((le_u32, le_u8, take(3u32)))(input)?;
+    // convert flags to enum
+    let hierarchy_type = (hierarchy_type as u32).try_into().map_or(None, |x| Some(x));
+
+    // prepare basic info
+    let mut ch_block = CHBlock::new();
+    ch_block.id = id;
+    ch_block.block_size = block_size as u64;
+    ch_block.links_count = link_count;
+    ch_block.hierarchy_type = hierarchy_type;
+
+    Ok((input, (dependencies_count, ch_block)))
+}
+
+/// SRBlock basic info, fix length(8bytes)
+pub(crate) fn sr_block_basic(
+    input: &[u8],
+    id: String,
+    block_size: i64,
+    link_count: u64,
+) -> IResult<&[u8], SRBlock> {
+    let (input, (reduced_samples_number, time_interval_len, flags)) =
+        tuple((le_u64, le_f64, le_u8))(input)?;
+    // convert flags to enum
+    let flags = (flags as u32).try_into().map_or(None, |x| Some(x));
+
+    // prepare basic info
+    let mut sr_block = SRBlock::new();
+    sr_block.id = id;
+    sr_block.block_size = block_size as u64;
+    sr_block.links_count = link_count;
+    sr_block.time_interval_len = time_interval_len;
+    sr_block.reduced_samples_number = reduced_samples_number;
+    sr_block.flags = flags;
+
+    Ok((input, sr_block))
 }

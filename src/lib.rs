@@ -277,6 +277,10 @@ impl DependencyType {
     }
 }
 
+pub trait DependencyObject {
+    fn create_dependencies(&self, mdf_file: &MDFFile);
+}
+
 pub trait DGObject {}
 
 pub trait CGObject<'a, CN, DG, SR> {

@@ -1,30 +1,30 @@
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
-use std::sync::Arc;
 use std::vec;
 
 use asammdf_derive::{
     basic_object, channel_conversion_object, channel_group_object, channel_object, comment_object,
     data_group_object, id_object, mdf_object, normal_object_v4,
 };
-use asammdf_derive::{IDObject, MDFObject, PermanentBlock};
+use asammdf_derive::{IDObject, PermanentBlock};
 use chrono::{DateTime, Local};
-use itertools::Zip;
+use libflate;
 use tempfile::tempfile;
 
 use self::parser::{
-    block_base, cc_block_basic, cg_block_basic, cn_block_basic, dg_block_basic, dl_block_basic,
-    dz_block_basic, fh_block_basic, hd_block_basic, hl_block_basic, si_block_basic,
+    at_block_basic, block_base, cc_block_basic, cg_block_basic, ch_block_basic, cn_block_basic,
+    dg_block_basic, dl_block_basic, dz_block_basic, ev_block_basic, fh_block_basic, hd_block_basic,
+    hl_block_basic, si_block_basic, sr_block_basic,
 };
 use super::SpecVer;
 use super::UnfinalizedFlagsType;
 use crate::misc::helper::{read_le_f64, read_le_i64, read_n_le_f64};
 use crate::misc::transform_params;
 use crate::{
-    BlockId, ChannelType, ConversionType, IDObject, SignalType, SyncType, TimeFlagsType,
-    TimeQualityType,
+    BlockId, ChannelType, ConversionType, DependencyType, IDObject, SignalType, SyncType,
+    TimeFlagsType, TimeQualityType,
 };
 use crate::{ByteOrder, MDFErrorKind, MDFFile, MDFObject, RecordIDType};
 use crate::{CNObject, PermanentBlock};
@@ -61,12 +61,12 @@ pub enum ZipType {
     TransposeAndDeflate,
 }
 }
-
+enum_u32_convert! {
 #[derive(Clone, Copy, Debug)]
 pub enum SRFlags {
     InvalidationBytes = 1,
 }
-
+}
 enum_u32_convert! {
 #[derive(Clone, Copy, Debug)]
 pub enum Source {
@@ -83,14 +83,15 @@ pub enum SourceFlags {
     SimulatedSource,
 }
 }
-
+enum_u32_convert! {
 #[derive(Clone, Copy, Debug)]
 pub enum RangeType {
     Point,
     BeginRange,
     EndRange,
 }
-
+}
+enum_u32_convert! {
 #[derive(Clone, Copy, Debug)]
 /// hierarchy type
 pub enum Hierarchy {
@@ -104,7 +105,9 @@ pub enum Hierarchy {
     DefCharacteristic,
     RefCharacteristic,
 }
+}
 
+enum_u32_convert! {
 #[derive(Clone, Copy, Debug)]
 pub enum Event {
     Recording,
@@ -114,13 +117,13 @@ pub enum Event {
     StopRecordingTrigger,
     Trigger,
     Marker,
-}
-
+}}
+enum_u32_convert! {
 #[derive(Clone, Copy, Debug)]
 pub enum EventFlags {
     PostProcessing = 1,
 }
-
+}
 enum_u32_convert! {
 #[derive(Clone, Copy, Debug)]
 pub enum DataBlockFlags {
@@ -165,13 +168,15 @@ pub struct ChannelFlags:u32 {
 }
 }
 
+enum_u32_convert! {
 #[derive(Clone, Copy, Debug)]
 pub enum Cause {
     Other,
-    Error,
+    _Error,
     Tool,
     Script,
     User,
+}
 }
 
 enum_u32_convert! {
@@ -187,11 +192,13 @@ pub enum BusType {
 }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub enum AttachmentFlags {
-    EmbeddedData = 1,
-    CompressedEmbbeddedData = 2,
-    MD5ChecksumValid = 4,
+bitflags! {
+    pub struct AttachmentFlags:u16 {
+        const None = 0;
+        const EmbeddedData = 1;
+        const CompressedEmbbeddedData = 2;
+        const MD5ChecksumValid = 4;
+    }
 }
 
 #[mdf_object]
@@ -251,7 +258,7 @@ pub struct HDBlock {
     pub(crate) link_dg_start: i64,
     pub(crate) link_fh_start: i64,
     pub(crate) link_ch_start: i64,
-    pub(crate) link_atb_start: i64,
+    pub(crate) link_at_start: i64,
     pub(crate) link_ev_start: i64,
     pub(crate) link_comment: i64,
 }
@@ -290,7 +297,7 @@ impl HDBlock {
             link_dg_start: 0,
             link_fh_start: 0,
             link_ch_start: 0,
-            link_atb_start: 0,
+            link_at_start: 0,
             link_ev_start: 0,
             link_comment: 0,
         }
@@ -306,7 +313,7 @@ impl HDBlock {
             mut link_dg_start,
             mut link_fh_start,
             mut link_ch_start,
-            mut link_atb_start,
+            mut link_at_start,
             mut link_ev_start,
             mut link_comment,
         ) = (0, 0, 0, 0, 0, 0);
@@ -316,7 +323,7 @@ impl HDBlock {
                 0 => link_dg_start = *val,
                 1 => link_fh_start = *val,
                 2 => link_ch_start = *val,
-                3 => link_atb_start = *val,
+                3 => link_at_start = *val,
                 4 => link_ev_start = *val,
                 5 => link_comment = *val,
                 _ => {}
@@ -333,7 +340,7 @@ impl HDBlock {
         hd_block.link_dg_start = link_dg_start;
         hd_block.link_fh_start = link_fh_start;
         hd_block.link_ch_start = link_ch_start;
-        hd_block.link_atb_start = link_atb_start;
+        hd_block.link_at_start = link_at_start;
         hd_block.link_ev_start = link_ev_start;
         hd_block.link_comment = link_comment;
 
@@ -350,36 +357,38 @@ impl HDBlock {
         instance
             .id
             .unwrap()
-            .checked_append(hd_id, &mut instance.arena);
+            .checked_append(hd_id, &mut instance.arena)
+            .unwrap();
 
         // parse dg blocks
-        let mut link_dg = link_dg_start;
+        let mut link_dg = link_dg_start as u64;
         while link_dg > 0 {
-            break;
+            link_dg = DGBlock::parse(byte_order, link_dg, hd_id, instance)?;
         }
         // parse fh blocks
-        let mut link_fh = link_fh_start;
+        let mut link_fh = link_fh_start as u64;
         while link_fh > 0 {
-            break;
+            link_fh = FHBlock::parse(byte_order, link_fh, hd_id, instance)?;
         }
         // parse ch blocks
-        let mut link_ch = link_ch_start;
+        let mut link_ch = link_ch_start as u64;
         while link_ch > 0 {
-            break;
+            link_ch = CHBlock::parse(byte_order, link_ch, hd_id, instance)?;
         }
         // parse atb blocks
-        let mut link_atb = link_atb_start;
-        while link_atb > 0 {
-            break;
+        let mut link_at = link_at_start as u64;
+        while link_at > 0 {
+            link_at = ATBlock::parse(byte_order, link_at, hd_id, instance)?;
         }
         // parse ev blocks
-        let mut link_ev = link_ev_start;
+        let mut link_ev = link_ev_start as u64;
         while link_ev > 0 {
-            break;
+            link_ev = EVBlock::parse(byte_order, link_ev, hd_id, instance)?;
         }
 
         buf_reader.seek(SeekFrom::Start(pos)).unwrap();
-        todo!()
+
+        Ok(())
     }
 }
 
@@ -412,10 +421,14 @@ fn read_v4_basic_info(
 #[basic_object]
 #[derive(Debug, PermanentBlock)]
 pub struct ATBlock {
-    pub attachment_flags: Option<AttachmentFlags>,
+    pub attachment_flags: AttachmentFlags,
     pub creator_index: u16,
     pub filename: String,
     pub mime_type: String,
+    pub(crate) link_next_at: i64,
+    pub(crate) link_filename: i64,
+    pub(crate) link_mime_type: i64,
+    pub(crate) link_comment: i64,
 }
 
 impl MDFObject for ATBlock {
@@ -428,12 +441,253 @@ impl MDFObject for ATBlock {
     }
 }
 
+impl ATBlock {
+    pub fn new() -> Self {
+        ATBlock {
+            attachment_flags: AttachmentFlags::None,
+            creator_index: 0,
+            filename: Default::default(),
+            mime_type: Default::default(),
+            comment: Default::default(),
+            id: "AT".to_string(),
+            block_size: 0,
+            links_count: 0,
+            block_id: None,
+            link_next_at: 0,
+            link_filename: 0,
+            link_mime_type: 0,
+            link_comment: 0,
+        }
+    }
+    // parse at block
+    pub(crate) fn parse(
+        byte_order: ByteOrder,
+        link_id: u64,
+        parent_id: BlockId,
+        instance: &mut MDFFile,
+    ) -> Result<u64, MDFErrorKind> {
+        let mut buf_reader = instance.get_buf_reader()?;
+        let pos = buf_reader.stream_position().unwrap();
+        // seek to link_id position
+        buf_reader.seek(SeekFrom::Start(link_id)).unwrap();
+        // read the block basic info
+        let (id, block_size, links, next_pos) = read_v4_basic_info(link_id, instance)?;
+
+        // go to next pos, and construct at block(4bytes)
+        buf_reader.seek(SeekFrom::Start(next_pos)).unwrap();
+        let mut data = vec![0; 4];
+        buf_reader.read_exact(&mut data).unwrap();
+        let mut at_block = at_block_basic(&data, id, block_size, links.len() as u64)
+            .unwrap()
+            .1;
+
+        // get links out
+        let mut link_next_at = 0;
+        let mut link_filename = 0;
+        let mut link_mime_type = 0;
+        let mut link_comment = 0;
+
+        // loop links and assign links
+        for (i, val) in links.iter().enumerate() {
+            match i {
+                0 => link_next_at = *val,
+                1 => link_filename = *val,
+                2 => link_mime_type = *val,
+                3 => link_comment = *val,
+                _ => {}
+            }
+        }
+        // save links to ev_block
+        at_block.link_next_at = link_next_at;
+        at_block.link_filename = link_filename;
+        at_block.link_mime_type = link_mime_type;
+        at_block.link_comment = link_comment;
+
+        // get comment from comment rdsdblock
+        if link_comment > 0 {
+            let comment_block = RDSDBlock::parse(byte_order, link_comment as u64, instance)?;
+            at_block.comment = String::from_utf8_lossy(&comment_block.data).to_string();
+        }
+        // get name from name rdsdblock
+        if link_filename > 0 {
+            let filename_block = RDSDBlock::parse(byte_order, link_filename as u64, instance)?;
+            at_block.filename = String::from_utf8_lossy(&filename_block.data).to_string();
+        }
+        // get mimetype from rdsdblock
+        if link_mime_type > 0 {
+            let mime_type_block = RDSDBlock::parse(byte_order, link_mime_type as u64, instance)?;
+            at_block.mime_type = String::from_utf8_lossy(&mime_type_block.data).to_string();
+        }
+
+        // store to arena
+        let at_id = instance.arena.new_node(Box::new(at_block));
+        // add at block to parent
+        parent_id
+            .checked_append(at_id, &mut instance.arena)
+            .unwrap();
+        instance
+            .get_mut_node_by_id::<EVBlock>(at_id)
+            .unwrap()
+            .block_id = Some(at_id);
+
+        // restore stream position
+        buf_reader.seek(SeekFrom::Start(pos)).unwrap();
+
+        Ok(link_next_at as u64)
+    }
+}
+
 #[normal_object_v4]
 #[comment_object]
+#[basic_object]
+#[derive(Debug, PermanentBlock)]
 pub struct CHBlock {
-    // chblocks?
-    // dependency type?u
-    pub hierarchy_type: Hierarchy,
+    pub hierarchy_type: Option<Hierarchy>,
+    pub dependencies: Option<Vec<DependencyType>>,
+    dependencies_type_data: Vec<i64>,
+    pub name: String,
+    pub(crate) link_next_ch: i64,
+    pub(crate) link_ch_start: i64,
+    pub(crate) link_name: i64,
+    pub(crate) link_comment: i64,
+}
+
+impl MDFObject for CHBlock {
+    fn block_size(&self) -> u64 {
+        self.block_size
+    }
+
+    fn name(&self) -> String {
+        self.name.clone()
+    }
+}
+
+impl<'a> CHBlock {
+    pub fn new() -> Self {
+        CHBlock {
+            hierarchy_type: None,
+            dependencies: todo!(),
+            name: Default::default(),
+            id: "CH".to_string(),
+            block_size: 0,
+            links_count: 0,
+            comment: Default::default(),
+            dependencies_type_data: vec![],
+            link_next_ch: 0,
+            link_ch_start: 0,
+            link_name: 0,
+            link_comment: 0,
+            block_id: None,
+        }
+    }
+
+    fn chblocks(&self, mdf_file: &'a MDFFile) -> Option<Vec<&'a CHBlock>> {
+        let id = self.block_id.clone();
+        id.map_or(None, |node_id| {
+            mdf_file.get_nodes_by_parent::<CHBlock>(node_id)
+        })
+    }
+
+    // parse ch block
+    pub(crate) fn parse(
+        byte_order: ByteOrder,
+        link_id: u64,
+        parent_id: BlockId,
+        instance: &mut MDFFile,
+    ) -> Result<u64, MDFErrorKind> {
+        let mut buf_reader = instance.get_buf_reader()?;
+        let pos = buf_reader.stream_position().unwrap();
+        // seek to link_id position
+        buf_reader.seek(SeekFrom::Start(link_id)).unwrap();
+        // read the block basic info
+        let (id, block_size, links, next_pos) = read_v4_basic_info(link_id, instance)?;
+
+        // go to next pos, and construct ch block(8bytes)
+        buf_reader.seek(SeekFrom::Start(next_pos)).unwrap();
+        let mut data = vec![0; 8];
+        buf_reader.read_exact(&mut data).unwrap();
+        let (dependencies_count, mut ch_block) =
+            ch_block_basic(&data, id, block_size, links.len() as u64)
+                .unwrap()
+                .1;
+
+        // get links out
+        let mut link_next_ch = 0;
+        let mut link_ch_start = 0;
+        let mut link_name = 0;
+        let mut link_comment = 0;
+
+        // loop links and assign links
+        for (i, val) in links.iter().enumerate() {
+            match i {
+                0 => link_next_ch = *val,
+                1 => link_ch_start = *val,
+                2 => link_name = *val,
+                3 => link_comment = *val,
+                _ => {
+                    if *val > 0 {
+                        // add to refdata
+                        ch_block.dependencies_type_data.push(*val);
+                    }
+                }
+            }
+        }
+        // save links to ch_block
+        ch_block.link_next_ch = link_next_ch;
+        ch_block.link_ch_start = link_ch_start;
+        ch_block.link_name = link_name;
+        ch_block.link_comment = link_comment;
+
+        // get comment from comment rdsdblock
+        if link_comment > 0 {
+            let comment_block = RDSDBlock::parse(byte_order, link_comment as u64, instance)?;
+            ch_block.comment = String::from_utf8_lossy(&comment_block.data).to_string();
+        }
+        // get name from name rdsdblock
+        if link_name > 0 {
+            let name_block = RDSDBlock::parse(byte_order, link_name as u64, instance)?;
+            ch_block.name = String::from_utf8_lossy(&name_block.data).to_string();
+        }
+
+        // parse ch_block's dependencies_tyhpe_data to dependencies
+        let mut i = 0;
+        let mut idx = 0;
+        let mut dependencies = vec![];
+        while i < dependencies_count && idx < ch_block.dependencies_type_data.len() {
+            dependencies.push(DependencyType::new(
+                ch_block.dependencies_type_data[idx],
+                ch_block.dependencies_type_data[idx + 1],
+                ch_block.dependencies_type_data[idx + 2],
+            ));
+            i += 1;
+            idx += 3;
+        }
+        if !dependencies.is_empty() {
+            ch_block.dependencies = Some(dependencies);
+        }
+
+        // store to arena
+        let ch_id = instance.arena.new_node(Box::new(ch_block));
+        // add cc block to parent
+        parent_id
+            .checked_append(ch_id, &mut instance.arena)
+            .unwrap();
+        instance
+            .get_mut_node_by_id::<CHBlock>(ch_id)
+            .unwrap()
+            .block_id = Some(ch_id);
+
+        // get child ch blocks
+        let mut ch_link = link_ch_start as u64;
+        while ch_link > 0 {
+            ch_link = CHBlock::parse(byte_order, ch_link, ch_id, instance)?;
+        }
+
+        // restore stream position
+        buf_reader.seek(SeekFrom::Start(pos)).unwrap();
+
+        Ok(link_next_ch as u64)
+    }
 }
 
 /// MDFv4 Block
@@ -492,6 +746,221 @@ impl RDSDBlock {
     }
 }
 
+pub trait DataObject {
+    /// To be honest, it's impossible to pass file handler or other things to children of SRBlock.
+    /// we should collect all links of DTBlock and DZBlocks out and then create a temp file to store decompressed data.
+    /// Never parse DTBlock and DZBlock data in itself. Because of above reason, we shouldn't parse DZBlock data out in DZBlock
+    fn read_data(
+        instance: &mut MDFFile,
+        links: &Vec<i64>,
+        parent_id: BlockId,
+        link_data_idx: u64,
+    ) -> Result<(Option<ZippedReader>, Vec<(u64, BlockId)>), MDFErrorKind> {
+        let mut link_data = links[link_data_idx as usize] as u64;
+        let mut block_ids = vec![];
+        // links of DTBlock, and DZBlock
+        let mut data_blocks: Vec<DataBlockLink> = vec![];
+        while link_data > 0 {
+            // read another basic block info out
+            let (id, block_size, links, next_pos) = read_v4_basic_info(link_data, instance)?;
+            // match id type
+            match id.as_str() {
+                "RD" => {
+                    let rd_block = RDSDBlock::new(vec![], id);
+                    // store to arena
+                    let rd_id = instance.arena.new_node(Box::new(rd_block));
+                    parent_id
+                        .checked_append(rd_id, &mut instance.arena)
+                        .unwrap();
+                    instance
+                        .get_mut_node_by_id::<EVBlock>(rd_id)
+                        .unwrap()
+                        .block_id = Some(rd_id);
+                    block_ids.push((link_data, rd_id));
+                    link_data = 0;
+                }
+                "HL" => {
+                    let hl_id = HLBlock::parse(
+                        ByteOrder::LittleEndian,
+                        link_data,
+                        parent_id,
+                        instance,
+                        &mut data_blocks,
+                    )?;
+                    block_ids.push((link_data, hl_id));
+                    link_data = 0;
+                }
+                "DT" => {
+                    let dt_id =
+                        DTBlock::parse(ByteOrder::LittleEndian, link_data, parent_id, instance)?;
+                    block_ids.push((link_data, dt_id));
+                    link_data = 0;
+                }
+                "DL" => {
+                    let (link_data_temp, dl_id) = DLBlock::parse(
+                        ByteOrder::LittleEndian,
+                        link_data,
+                        parent_id,
+                        instance,
+                        &mut data_blocks,
+                    )?;
+                    link_data = link_data_temp;
+                    block_ids.push((link_data, dl_id));
+                    // get the DL block
+                }
+                "DZ" => {
+                    // get the DZ block
+                    let (dz_id, link_dz_data) =
+                        DZBlock::parse(ByteOrder::LittleEndian, link_data, parent_id, instance)?;
+                    block_ids.push((link_data, dz_id));
+                    data_blocks.push((DataBlockType::DZ, link_dz_data, dz_id));
+                    link_data = 0;
+                }
+                _ => {
+                    link_data = 0;
+                }
+            }
+        }
+        let mut zip_reader = None;
+        // if data blocks has elements, then create a temp file to store decompressed data
+        if data_blocks.len() != 0 {
+            // create a temp file, store handler inside self
+            zip_reader = Some(ZippedReader::new());
+            // get a mut ref to zip_reader
+            let writer = zip_reader.as_mut().unwrap();
+            // iterate data blocks and write data to tmp file
+            for (data_block_type, data_block_pos, data_block_id) in data_blocks {
+                match data_block_type {
+                    DataBlockType::DT => {
+                        writer.read_dt_block(data_block_id, data_block_pos, instance)?;
+                    }
+                    DataBlockType::DZ => {
+                        writer.read_dz_block(data_block_id, data_block_pos, instance)?;
+                    }
+                }
+            }
+        }
+        Ok((zip_reader, block_ids))
+    }
+}
+
+#[normal_object_v4]
+#[basic_object]
+#[derive(Debug, PermanentBlock)]
+pub struct SRBlock {
+    pub flags: Option<SRFlags>,
+    pub time_interval_len: f64,
+    pub reduced_samples_number: u64,
+    pub(crate) link_next_block: u64,
+    pub(crate) link_data_block: u64,
+    pub(crate) zip_reader: Option<ZippedReader>,
+    pub(crate) blocks: Vec<(u64, BlockId)>,
+}
+
+pub(crate) fn clone_file_handler(file: Option<&mut File>) -> Option<File> {
+    match file {
+        Some(f) => Some(f.try_clone().unwrap()),
+        None => None,
+    }
+}
+
+impl MDFObject for SRBlock {
+    fn block_size(&self) -> u64 {
+        self.block_size
+    }
+
+    fn name(&self) -> String {
+        self.id.clone()
+    }
+}
+
+impl SRBlock {
+    pub fn new() -> Self {
+        SRBlock {
+            flags: None,
+            time_interval_len: 0.0,
+            reduced_samples_number: 0,
+            id: "SR".to_string(),
+            block_size: 0,
+            links_count: 0,
+            block_id: None,
+            link_next_block: 0,
+            link_data_block: 0,
+            zip_reader: None,
+            blocks: vec![],
+        }
+    }
+    // parse sr block
+    pub(crate) fn parse(
+        byte_order: ByteOrder,
+        link_id: u64,
+        parent_id: BlockId,
+        instance: &mut MDFFile,
+    ) -> Result<u64, MDFErrorKind> {
+        let mut buf_reader = instance.get_buf_reader()?;
+        let pos = buf_reader.stream_position().unwrap();
+        // seek to link_id position
+        buf_reader.seek(SeekFrom::Start(link_id)).unwrap();
+        // read the block basic info
+        let (id, block_size, links, next_pos) = read_v4_basic_info(link_id, instance)?;
+
+        // go to next pos, and construct ev block(32bytes)
+        buf_reader.seek(SeekFrom::Start(next_pos)).unwrap();
+        let mut data = vec![0; 32];
+        buf_reader.read_exact(&mut data).unwrap();
+        let mut sr_block = sr_block_basic(&data, id, block_size, links.len() as u64)
+            .unwrap()
+            .1;
+
+        let mut link_next_block = 0;
+        let mut link_data_block = 0;
+        // get all links
+        for (i, val) in links.iter().enumerate() {
+            match i {
+                0 => {
+                    // get link to CG block
+                    link_next_block = *val as u64;
+                }
+                1 => {
+                    // get link to CG block
+                    link_data_block = *val as u64;
+                }
+                _ => {}
+            }
+        }
+        sr_block.link_next_block = link_next_block;
+        sr_block.link_data_block = link_data_block;
+
+        // save sr block to instance's arena
+        let sr_id = instance.arena.new_node(Box::new(sr_block));
+        // add sr block to parent
+        parent_id
+            .checked_append(sr_id, &mut instance.arena)
+            .unwrap();
+        let (zipped_reader, blocks_ids) = SRBlock::read_data(instance, &links, sr_id, 1)?;
+
+        let sr = instance.get_mut_node_by_id::<SRBlock>(sr_id).unwrap();
+        sr.block_id = Some(sr_id);
+        sr.zip_reader = zipped_reader;
+        sr.blocks = blocks_ids;
+
+        // restore stream position
+        buf_reader.seek(SeekFrom::Start(pos)).unwrap();
+
+        Ok(link_next_block as u64)
+    }
+}
+
+pub enum DataBlockType {
+    DT,
+    DZ,
+}
+
+/// (DataBlockType, position, block_id)
+type DataBlockLink = (DataBlockType, u64, BlockId);
+
+impl DataObject for SRBlock {}
+
 #[normal_object_v4]
 #[comment_object]
 #[data_group_object]
@@ -503,6 +972,7 @@ pub struct DGBlock {
     pub(crate) link_next_block: u64,
     pub(crate) link_data_block: u64,
     pub(crate) zip_reader: Option<ZippedReader>,
+    pub(crate) blocks: Vec<(u64, BlockId)>,
 }
 
 impl MDFObject for DGBlock {
@@ -514,6 +984,9 @@ impl MDFObject for DGBlock {
         "Data group".to_string()
     }
 }
+
+impl DataObject for DGBlock {}
+
 #[derive(Debug)]
 pub struct ZippedReader {
     pub tmp_file: File,
@@ -535,6 +1008,97 @@ impl ZippedReader {
 
     pub fn get_position(&mut self) -> u64 {
         self.tmp_file.stream_position().unwrap()
+    }
+
+    pub fn read_dz_block(
+        &mut self,
+        dz_block: BlockId,
+        position: u64,
+        instance: &mut MDFFile,
+    ) -> Result<(), MDFErrorKind> {
+        let dz_block = instance.get_node_by_id::<DZBlock>(dz_block).unwrap();
+        // first read data out
+        let mut compressed_data = vec![0; (dz_block.length - 2) as usize];
+        let zip_type = dz_block.zip_type;
+        let group = dz_block.size / (dz_block.zip_parameter as i64);
+        let group_size = dz_block.zip_parameter;
+        let mut buf_reader = instance.get_buf_reader()?;
+        let pos = buf_reader.stream_position().unwrap();
+        buf_reader.seek(SeekFrom::Start(position + 2)).unwrap();
+        buf_reader.read_exact(&mut compressed_data).unwrap();
+
+        // get compressed data, then decompress it, write to a file
+        match zip_type {
+            Some(ZipType::Deflate) => {
+                let mut decoder = libflate::deflate::Decoder::new(compressed_data.as_slice());
+                let mut decompressed_data = vec![];
+                decoder.read_to_end(&mut decompressed_data).unwrap();
+                self.tmp_file.write_all(&mut decompressed_data).unwrap();
+            }
+            Some(ZipType::TransposeAndDeflate) => {
+                let mut decoder = libflate::deflate::Decoder::new(compressed_data.as_slice());
+                let mut decompressed_data = vec![];
+                decoder.read_to_end(&mut decompressed_data).unwrap();
+                // after get th edecompressed data, we need to transpose the data
+                self.write_transpose_data(&decompressed_data, group as u32, group_size);
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    pub fn read_dt_block(
+        &mut self,
+        dt_block: BlockId,
+        position: u64,
+        instance: &mut MDFFile,
+    ) -> Result<(), MDFErrorKind> {
+        let dt_block = instance.get_node_by_id::<DTBlock>(dt_block).unwrap();
+        let size = dt_block.size();
+
+        let mut buf_reader = instance.get_buf_reader()?;
+        let pos = buf_reader.stream_position().unwrap();
+        buf_reader.seek(SeekFrom::Start(position)).unwrap();
+
+        let mut buf_writer = self.get_buf_writer().unwrap();
+        buf_writer.seek(SeekFrom::End(0)).unwrap();
+
+        let count = 0;
+        while size > count {
+            let mut temp = vec![0; 65536.min(size - count) as usize];
+            buf_reader.read_exact(&mut temp).unwrap();
+            // write to buf writer
+            buf_writer.write(&mut temp).unwrap();
+        }
+        buf_writer.flush();
+        Ok(())
+    }
+
+    pub fn get_buf_writer(&mut self) -> Result<BufWriter<File>, MDFErrorKind> {
+        let x = self
+            .tmp_file
+            .try_clone()
+            .map_err(|x| MDFErrorKind::IOError(x))?;
+        Ok(BufWriter::new(x))
+    }
+
+    fn write_transpose_data(&mut self, data: &Vec<u8>, group: u32, group_size: u32) {
+        // first get a buf writer of the tmp file
+        let mut buf_writer = self.get_buf_writer().unwrap();
+        buf_writer.seek(SeekFrom::End(0)).unwrap();
+        for i in 0..group {
+            for j in 0..group_size {
+                buf_writer.write(&[data[(j * group + i) as usize]]).unwrap();
+            }
+        }
+        // if have some data left, write it all to the tmp file
+        if data.len() as u64 > (group * group_size) as u64 {
+            buf_writer
+                .write(&data[(group * group_size) as usize..])
+                .unwrap();
+        }
+        buf_writer.flush();
     }
 }
 
@@ -572,6 +1136,7 @@ impl DGBlock {
             link_data_block: 0,
             link_next_block: 0,
             zip_reader: None,
+            blocks: vec![],
         }
     }
     /// parse a DGBlock from file position at link_id, then add it to instance as child of parent_id
@@ -616,35 +1181,6 @@ impl DGBlock {
                 _ => {}
             }
         }
-        while link_data_block > 0 {
-            // read another basic block info out
-            let (id, block_size, links, next_pos) = read_v4_basic_info(link_data_block, instance)?;
-            // match id type
-            match id.as_str() {
-                "RD" => {
-                    let rd_block = RDSDBlock::new(vec![], id);
-                    link_data_block = 0;
-                }
-                "HL" => {
-                    link_data_block = 0;
-                    // get the HL block
-                }
-                "DT" => {
-                    link_data_block = 0;
-                    // get the DT block
-                }
-                "DL" => {
-                    // get the DL block
-                }
-                "DZ" => {
-                    link_data_block = 0;
-                    // get the DZ block
-                }
-                _ => {
-                    link_data_block = 0;
-                }
-            }
-        }
 
         // go to next pos, and construct dg block
         buf_reader.seek(SeekFrom::Start(next_pos)).unwrap();
@@ -670,14 +1206,16 @@ impl DGBlock {
             .checked_append(dg_id, &mut instance.arena)
             .unwrap();
 
-        instance
-            .get_mut_node_by_id::<DGBlock>(dg_id)
-            .unwrap()
-            .block_id = Some(dg_id);
+        let (zipped_reader, blocks_ids) = DGBlock::read_data(instance, &links, dg_id, 2)?;
+
+        let dg_ref = instance.get_mut_node_by_id::<DGBlock>(dg_id).unwrap();
+        dg_ref.block_id = Some(dg_id);
+        dg_ref.zip_reader = zipped_reader;
+
         // parse cg blocks
         let mut cg_link = link_cg_start;
         while cg_link > 0 {
-            break;
+            cg_link = CGBlock::parse(byte_order, cg_link, dg_id, instance)?;
         }
 
         // restore stream position
@@ -723,7 +1261,8 @@ impl<'a> HLBlock {
         link_id: u64,
         parent_id: BlockId,
         instance: &mut MDFFile,
-    ) -> Result<(), MDFErrorKind> {
+        data_blocks: &mut Vec<DataBlockLink>,
+    ) -> Result<BlockId, MDFErrorKind> {
         let mut buf_reader = instance.get_buf_reader()?;
         let pos = buf_reader.stream_position().unwrap();
         // seek to link_id position
@@ -766,13 +1305,13 @@ impl<'a> HLBlock {
         // parse dl blocks
         let mut dl_link = link_dl_start;
         while dl_link > 0 {
-            break;
+            dl_link = DLBlock::parse(byte_order, dl_link, hl_id, instance, data_blocks)?.0;
         }
 
         // restore stream position
         buf_reader.seek(SeekFrom::Start(pos)).unwrap();
 
-        Ok(())
+        Ok(hl_id)
     }
 
     pub fn dlblocks(&self, mdf_file: &'a MDFFile) -> Option<Vec<&'a DLBlock>> {
@@ -826,7 +1365,8 @@ impl DLBlock {
         link_id: u64,
         parent_id: BlockId,
         instance: &mut MDFFile,
-    ) -> Result<u64, MDFErrorKind> {
+        data_blocks: &mut Vec<DataBlockLink>,
+    ) -> Result<(u64, BlockId), MDFErrorKind> {
         let mut buf_reader = instance.get_buf_reader()?;
         let pos = buf_reader.stream_position().unwrap();
         // seek to link_id position
@@ -877,11 +1417,13 @@ impl DLBlock {
                     "DT" => {
                         // parse a DT Block
                         let dt_id = DTBlock::parse(byte_order, *link as u64, dl_id, instance)?;
+                        data_blocks.push((DataBlockType::DT, *link as u64, dt_id));
                     }
                     "DZ" => {
                         // parse a DZ block
-                        let (dz_id, data) =
+                        let (dz_id, data_link) =
                             DZBlock::parse(byte_order, *link as u64, dl_id, instance)?;
+                        data_blocks.push((DataBlockType::DZ, data_link, dz_id));
                     }
                     _ => {
                         // do nothing
@@ -893,7 +1435,7 @@ impl DLBlock {
         // restore stream position
         buf_reader.seek(SeekFrom::Start(pos)).unwrap();
 
-        Ok(link_dl_next)
+        Ok((link_dl_next, dl_id))
     }
 }
 
@@ -1021,7 +1563,7 @@ impl DZBlock {
         link_id: u64,
         parent_id: BlockId,
         instance: &mut MDFFile,
-    ) -> Result<(BlockId, Vec<u8>), MDFErrorKind> {
+    ) -> Result<(BlockId, u64), MDFErrorKind> {
         let mut buf_reader = instance.get_buf_reader()?;
         let pos = buf_reader.stream_position().unwrap();
         // seek to link_id position
@@ -1041,8 +1583,9 @@ impl DZBlock {
             return Err(MDFErrorKind::UnsupportedZipType);
         }
         // read compressed data out
-        let mut compressed_data = vec![0; dz_block.length as usize];
-        buf_reader.read_exact(&mut compressed_data).unwrap();
+        let compressed_data_pos = buf_reader.stream_position().unwrap();
+        // let mut compressed_data = vec![0; dz_block.length as usize];
+        // buf_reader.read_exact(&mut compressed_data).unwrap();
 
         // save dz block to instance's arena
         let dz_id = instance.arena.new_node(Box::new(dz_block));
@@ -1058,7 +1601,7 @@ impl DZBlock {
         // restore stream position
         buf_reader.seek(SeekFrom::Start(pos)).unwrap();
 
-        Ok((dz_id, compressed_data))
+        Ok((dz_id, compressed_data_pos))
     }
 }
 
@@ -1193,15 +1736,15 @@ impl CGBlock {
         }
 
         // parse cn blocks
-        let mut cn_link = link_cn_start;
+        let mut cn_link = link_cn_start as u64;
         while cn_link > 0 {
-            break;
+            cn_link = CNBlock::parse(byte_order, cn_link, cg_id, instance)?;
         }
 
         // parse sr blocks
-        let mut sr_link = link_sr_start;
+        let mut sr_link = link_sr_start as u64;
         while sr_link > 0 {
-            break;
+            sr_link = SRBlock::parse(byte_order, sr_link, cg_id, instance)?;
         }
 
         // restore stream position
@@ -1909,7 +2452,6 @@ impl FHBlock {
         link_id: u64,
         parent_id: BlockId,
         instance: &mut MDFFile,
-        add_as_child: bool,
     ) -> Result<u64, MDFErrorKind> {
         let mut buf_reader = instance.get_buf_reader()?;
         let pos = buf_reader.stream_position().unwrap();
@@ -1978,7 +2520,10 @@ pub struct EVBlock {
     pub sync_base_val: i64,
     pub sync_factor: f64,
     pub evt_type: Option<Event>,
+    pub name: String,
     pub(crate) link_next_ev: u64,
+    pub(crate) link_comment: u64,
+    pub(crate) link_name: u64,
     pub(crate) ref_datas: Vec<u64>,
 }
 
@@ -1988,7 +2533,7 @@ impl MDFObject for EVBlock {
     }
 
     fn name(&self) -> String {
-        self.id.clone()
+        self.name.clone()
     }
 }
 
@@ -2010,6 +2555,9 @@ impl EVBlock {
             comment: Default::default(),
             block_id: None,
             ref_datas: vec![],
+            link_comment: 0,
+            link_name: 0,
+            name: Default::default(),
         }
     }
 
@@ -2019,7 +2567,6 @@ impl EVBlock {
         link_id: u64,
         parent_id: BlockId,
         instance: &mut MDFFile,
-        add_as_child: bool,
     ) -> Result<u64, MDFErrorKind> {
         let mut buf_reader = instance.get_buf_reader()?;
         let pos = buf_reader.stream_position().unwrap();
@@ -2028,49 +2575,64 @@ impl EVBlock {
         // read the block basic info
         let (id, block_size, links, next_pos) = read_v4_basic_info(link_id, instance)?;
 
-        // go to next pos, and construct fh block(16bytes)
+        // go to next pos, and construct ev block(32bytes)
         buf_reader.seek(SeekFrom::Start(next_pos)).unwrap();
-        let mut data = vec![0; 16];
+        let mut data = vec![0; 32];
         buf_reader.read_exact(&mut data).unwrap();
-        let mut fh_block = fh_block_basic(&data, id, block_size, links.len() as u64)
+        let mut ev_block = ev_block_basic(&data, id, block_size, links.len() as u64)
             .unwrap()
             .1;
 
         // get links out
+        let mut link_next_ev = 0;
+        let mut link_name = 0;
         let mut link_comment = 0;
-        let mut link_fh_next = 0;
+
         // loop links and assign links
         for (i, val) in links.iter().enumerate() {
             match i {
-                0 => link_fh_next = *val,
-                1 => link_comment = *val,
-                _ => {}
+                0 => link_next_ev = *val,
+                1 | 2 => {}
+                3 => link_name = *val,
+                4 => link_comment = *val,
+                _ => {
+                    if *val > 0 {
+                        // add to refdata
+                        ev_block.ref_datas.push(*val as u64);
+                    }
+                }
             }
         }
-        // save links to fh_block
-        fh_block.link_comment = link_comment as u64;
-        fh_block.link_fh_next = link_fh_next as u64;
+        // save links to ev_block
+        ev_block.link_next_ev = link_next_ev as u64;
+        ev_block.link_comment = link_comment as u64;
+        ev_block.link_name = link_name as u64;
 
         // get comment from comment rdsdblock
         if link_comment > 0 {
             let comment_block = RDSDBlock::parse(byte_order, link_comment as u64, instance)?;
-            fh_block.comment = String::from_utf8_lossy(&comment_block.data).to_string();
+            ev_block.comment = String::from_utf8_lossy(&comment_block.data).to_string();
+        }
+        // get name from name rdsdblock
+        if link_name > 0 {
+            let name_block = RDSDBlock::parse(byte_order, link_name as u64, instance)?;
+            ev_block.name = String::from_utf8_lossy(&name_block.data).to_string();
         }
 
         // store to arena
-        let fh_id = instance.arena.new_node(Box::new(fh_block));
+        let ev_id = instance.arena.new_node(Box::new(ev_block));
         // add cc block to parent
         parent_id
-            .checked_append(fh_id, &mut instance.arena)
+            .checked_append(ev_id, &mut instance.arena)
             .unwrap();
         instance
-            .get_mut_node_by_id::<FHBlock>(fh_id)
+            .get_mut_node_by_id::<EVBlock>(ev_id)
             .unwrap()
-            .block_id = Some(fh_id);
+            .block_id = Some(ev_id);
 
         // restore stream position
         buf_reader.seek(SeekFrom::Start(pos)).unwrap();
 
-        Ok(link_fh_next as u64)
+        Ok(link_next_ev as u64)
     }
 }
