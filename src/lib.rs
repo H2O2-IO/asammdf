@@ -348,7 +348,7 @@ pub struct MDFFile {
     /// specification version read from ID block
     pub spec_ver: Option<SpecVer>,
     /// a cache for link between id and blockid
-    link_id_blocks: HashMap<u64, BlockId>,
+    pub(crate) link_id_blocks: HashMap<u64, BlockId>,
 }
 
 impl MDFFile {
@@ -439,6 +439,8 @@ impl MDFFile {
             // v3::hdblock
             v3::HDBlock::parse(byte_order, self)?;
         } else if self.is_v4() {
+            // v4::hdblock
+            v4::HDBlock::parse(ByteOrder::LittleEndian, self)?;
         } else {
             return Err(MDFErrorKind::VersionError(
                 "MDF Specification Verion unsupported!".into(),
@@ -602,6 +604,8 @@ impl MDFFile {
                     self.get_format_value_by_array(format, id, data, 0, false)
                 }
             }
+        } else if self.is_v4() {
+            f64::NAN
         } else {
             f64::NAN
         }

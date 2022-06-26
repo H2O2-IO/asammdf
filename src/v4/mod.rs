@@ -363,7 +363,9 @@ impl HDBlock {
         // parse dg blocks
         let mut link_dg = link_dg_start as u64;
         while link_dg > 0 {
-            link_dg = DGBlock::parse(byte_order, link_dg, hd_id, instance)?;
+            let (next_dg, block_id) = DGBlock::parse(byte_order, link_dg, hd_id, instance)?;
+            instance.link_id_blocks.insert(link_dg, block_id);
+            link_dg = next_dg;
         }
         // parse fh blocks
         let mut link_fh = link_fh_start as u64;
@@ -378,12 +380,16 @@ impl HDBlock {
         // parse atb blocks
         let mut link_at = link_at_start as u64;
         while link_at > 0 {
-            link_at = ATBlock::parse(byte_order, link_at, hd_id, instance)?;
+            let (next_at, block_id) = ATBlock::parse(byte_order, link_at, hd_id, instance)?;
+            instance.link_id_blocks.insert(link_at, block_id);
+            link_at = next_at;
         }
         // parse ev blocks
         let mut link_ev = link_ev_start as u64;
         while link_ev > 0 {
-            link_ev = EVBlock::parse(byte_order, link_ev, hd_id, instance)?;
+            let (next_ev, block_id) = EVBlock::parse(byte_order, link_ev, hd_id, instance)?;
+            instance.link_id_blocks.insert(link_ev, block_id);
+            link_ev = next_ev;
         }
 
         buf_reader.seek(SeekFrom::Start(pos)).unwrap();
@@ -465,7 +471,7 @@ impl ATBlock {
         link_id: u64,
         parent_id: BlockId,
         instance: &mut MDFFile,
-    ) -> Result<u64, MDFErrorKind> {
+    ) -> Result<(u64, BlockId), MDFErrorKind> {
         let mut buf_reader = instance.get_buf_reader()?;
         let pos = buf_reader.stream_position().unwrap();
         // seek to link_id position
@@ -533,7 +539,7 @@ impl ATBlock {
         // restore stream position
         buf_reader.seek(SeekFrom::Start(pos)).unwrap();
 
-        Ok(link_next_at as u64)
+        Ok((link_next_at as u64, at_id))
     }
 }
 
@@ -1098,7 +1104,7 @@ impl ZippedReader {
                 .write(&data[(group * group_size) as usize..])
                 .unwrap();
         }
-        buf_writer.flush();
+        buf_writer.flush().unwrap();
     }
 }
 
@@ -1146,7 +1152,7 @@ impl DGBlock {
         link_id: u64,
         parent_id: BlockId,
         instance: &mut MDFFile,
-    ) -> Result<u64, MDFErrorKind> {
+    ) -> Result<(u64, BlockId), MDFErrorKind> {
         let mut buf_reader = instance.get_buf_reader()?;
         let pos = buf_reader.stream_position().unwrap();
         // seek to link_id position
@@ -1215,12 +1221,14 @@ impl DGBlock {
         // parse cg blocks
         let mut cg_link = link_cg_start;
         while cg_link > 0 {
-            cg_link = CGBlock::parse(byte_order, cg_link, dg_id, instance)?;
+            let (cg_next, block_id) = CGBlock::parse(byte_order, cg_link, dg_id, instance)?;
+            instance.link_id_blocks.insert(cg_link, block_id);
+            cg_link = cg_next;
         }
 
         // restore stream position
         buf_reader.seek(SeekFrom::Start(pos)).unwrap();
-        Ok(link_next_block)
+        Ok((link_next_block, dg_id))
     }
 }
 
@@ -1594,7 +1602,7 @@ impl DZBlock {
             .checked_append(dz_id, &mut instance.arena)
             .unwrap();
         instance
-            .get_mut_node_by_id::<DGBlock>(dz_id)
+            .get_mut_node_by_id::<DZBlock>(dz_id)
             .unwrap()
             .block_id = Some(dz_id);
 
@@ -1663,7 +1671,7 @@ impl CGBlock {
         link_id: u64,
         parent_id: BlockId,
         instance: &mut MDFFile,
-    ) -> Result<u64, MDFErrorKind> {
+    ) -> Result<(u64, BlockId), MDFErrorKind> {
         let mut buf_reader = instance.get_buf_reader()?;
         let pos = buf_reader.stream_position().unwrap();
         // seek to link_id position
@@ -1738,7 +1746,10 @@ impl CGBlock {
         // parse cn blocks
         let mut cn_link = link_cn_start as u64;
         while cn_link > 0 {
-            cn_link = CNBlock::parse(byte_order, cn_link, cg_id, instance)?;
+            let (next_cn, block_id) = CNBlock::parse(byte_order, cn_link, cg_id, instance)?;
+            // insert to instance's hashmap
+            instance.link_id_blocks.insert(cn_link, block_id);
+            cn_link = next_cn;
         }
 
         // parse sr blocks
@@ -1749,7 +1760,7 @@ impl CGBlock {
 
         // restore stream position
         buf_reader.seek(SeekFrom::Start(pos)).unwrap();
-        Ok(link_next_cgblock as u64)
+        Ok((link_next_cgblock as u64, cg_id))
     }
 }
 
@@ -1890,6 +1901,7 @@ pub struct CNBlock {
     pub precision: u8,
     pub zip_reader: Option<ZippedReader>,
     pub sd_block: Option<BlockId>,
+    pub(crate) blocks: Vec<(i64, BlockId)>,
     pub(crate) link_ids: Vec<u64>,
     pub(crate) link_cn_next: u64,
     pub(crate) link_name: u64,
@@ -1970,6 +1982,7 @@ impl CNBlock {
             link_comment: 0,
             zip_reader: None,
             sd_block: None,
+            blocks: vec![],
         }
     }
     /// parse CNBlocks
@@ -1978,7 +1991,7 @@ impl CNBlock {
         link_id: u64,
         parent_id: BlockId,
         instance: &mut MDFFile,
-    ) -> Result<u64, MDFErrorKind> {
+    ) -> Result<(u64, BlockId), MDFErrorKind> {
         let mut buf_reader = instance.get_buf_reader()?;
         let pos = buf_reader.stream_position().unwrap();
         // seek to link_id position
@@ -2054,6 +2067,7 @@ impl CNBlock {
         parent_id
             .checked_append(cn_id, &mut instance.arena)
             .unwrap();
+
         instance
             .get_mut_node_by_id::<CNBlock>(cn_id)
             .unwrap()
@@ -2079,13 +2093,104 @@ impl CNBlock {
         }
 
         // link sd block
+        // can be either atblock, hlblock, dlblock, or dzblock
         if link_sd_block > 0 {
             // todo:
+            let key = link_sd_block as u64;
+            if instance.link_id_blocks.contains_key(&key) {
+                instance
+                    .get_mut_node_by_id::<CNBlock>(cn_id)
+                    .unwrap()
+                    .sd_block = Some(instance.link_id_blocks.get(&key).unwrap().clone());
+            } else {
+                // if not inside dictionary, parse it here
+                let mut data_blocks: Vec<DataBlockLink> = vec![];
+                let mut block_ids = vec![];
+                let (id, block_size, links, next_pos) =
+                    read_v4_basic_info(link_sd_block as u64, instance)?;
+                match id.as_str() {
+                    "AT" => {
+                        let (_, block_id) =
+                            ATBlock::parse(byte_order, link_sd_block as u64, cn_id, instance)?;
+                        block_ids.push((link_sd_block, block_id));
+                    }
+                    "HL" => {
+                        let hl_id = HLBlock::parse(
+                            ByteOrder::LittleEndian,
+                            link_sd_block as u64,
+                            cn_id,
+                            instance,
+                            &mut data_blocks,
+                        )?;
+                        block_ids.push((link_sd_block, hl_id));
+                    }
+                    "DL" => {
+                        let (_, dl_id) = DLBlock::parse(
+                            ByteOrder::LittleEndian,
+                            link_sd_block as u64,
+                            cn_id,
+                            instance,
+                            &mut data_blocks,
+                        )?;
+                        block_ids.push((link_sd_block, dl_id));
+                    }
+                    "DZ" => {
+                        // get the DZ block
+                        let (dz_id, link_dz_data) = DZBlock::parse(
+                            ByteOrder::LittleEndian,
+                            link_sd_block as u64,
+                            cn_id,
+                            instance,
+                        )?;
+                        block_ids.push((link_sd_block, dz_id));
+                        data_blocks.push((DataBlockType::DZ, link_dz_data, dz_id));
+                    }
+                    _ => {}
+                }
+                // read datas out
+                if block_ids.len() != 0 {
+                    // set sdblock
+                    instance
+                        .get_mut_node_by_id::<CNBlock>(cn_id)
+                        .unwrap()
+                        .sd_block = Some(block_ids[0].1);
+                    let mut zip_reader = None;
+                    // if dz or dl block, read data out, and set zip reader
+                    if data_blocks.len() != 0 {
+                        // create a temp file, store handler inside self
+                        zip_reader = Some(ZippedReader::new());
+                        // get a mut ref to zip_reader
+                        let writer = zip_reader.as_mut().unwrap();
+                        // iterate data blocks and write data to tmp file
+                        for (data_block_type, data_block_pos, data_block_id) in data_blocks {
+                            match data_block_type {
+                                DataBlockType::DT => {
+                                    writer.read_dt_block(
+                                        data_block_id,
+                                        data_block_pos,
+                                        instance,
+                                    )?;
+                                }
+                                DataBlockType::DZ => {
+                                    writer.read_dz_block(
+                                        data_block_id,
+                                        data_block_pos,
+                                        instance,
+                                    )?;
+                                }
+                            }
+                        }
+                    }
+                    let cn_ref = instance.get_mut_node_by_id::<CNBlock>(cn_id).unwrap();
+                    cn_ref.zip_reader = zip_reader;
+                    cn_ref.blocks = block_ids;
+                }
+            }
         }
 
         // restore stream position
         buf_reader.seek(SeekFrom::Start(pos)).unwrap();
-        Ok(link_next_cn as u64)
+        Ok((link_next_cn as u64, cn_id))
     }
 }
 
@@ -2567,7 +2672,7 @@ impl EVBlock {
         link_id: u64,
         parent_id: BlockId,
         instance: &mut MDFFile,
-    ) -> Result<u64, MDFErrorKind> {
+    ) -> Result<(u64, BlockId), MDFErrorKind> {
         let mut buf_reader = instance.get_buf_reader()?;
         let pos = buf_reader.stream_position().unwrap();
         // seek to link_id position
@@ -2633,6 +2738,6 @@ impl EVBlock {
         // restore stream position
         buf_reader.seek(SeekFrom::Start(pos)).unwrap();
 
-        Ok(link_next_ev as u64)
+        Ok((link_next_ev as u64, ev_id))
     }
 }
