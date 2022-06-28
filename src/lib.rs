@@ -1,9 +1,11 @@
+//#![warn(missing_docs)]
+#![doc = include_str!("../README.md")]
 use std::{
     any::Any,
     collections::HashMap,
     fmt::Display,
     fs::File,
-    io::{self, BufReader, Read, Seek, SeekFrom},
+    io::{self, BufReader, Read, Seek, SeekFrom}, path::Path,
 };
 
 use chrono::{DateTime, Utc};
@@ -43,8 +45,8 @@ pub struct Annotation {
 }
 
 impl Annotation {
-    fn new(timestamp: f64, text: String) -> Annotation {
-        Annotation { timestamp, text }
+    fn new<S: AsRef<str>>(timestamp: f64, text: S) -> Annotation {
+        Annotation { timestamp, text:text.as_ref().to_owned() }
     }
 }
 
@@ -328,7 +330,7 @@ pub enum MDFErrorKind {
 /// ```
 /// use asammdf::{MDFFile,SpecVer};
 /// let mut file = MDFFile::new();
-/// file.open("./mdf3.dat".to_string()).unwrap();
+/// file.open("./mdf3.dat").unwrap();
 /// assert_eq!(file.spec_ver,Some(SpecVer::V3));
 /// ```
 ///
@@ -365,6 +367,10 @@ impl MDFFile {
         }
     }
 
+    pub fn get_id<T: 'static + IDObject + PermanentBlock>(&mut self)->Option<&T> {
+        self.get_node_by_id::<T>(self.id.unwrap())
+    }
+
     /// when use buffer reader, make sure to use SeekFrom::Start
     pub(crate) fn get_buf_reader(&mut self) -> Result<BufReader<File>, MDFErrorKind> {
         let x = self
@@ -392,7 +398,7 @@ impl MDFFile {
     }
 
     /// open a file, and than parse PermanentBlocks
-    pub fn open(&mut self, file_path: String) -> Result<(), MDFErrorKind> {
+    pub fn open<P: AsRef<Path>>(&mut self, file_path: P) -> Result<(), MDFErrorKind> {
         let mut file = File::open(&file_path).map_err(|x| MDFErrorKind::IOError(x))?;
         self.file_handler = Some(file.try_clone().map_err(|x| MDFErrorKind::IOError(x))?);
         let mut idblock_buf = [0; 64];
@@ -421,7 +427,7 @@ impl MDFFile {
             self.id = Some(self.arena.new_node(Box::new(idblock)));
             self.spec_ver = Some(SpecVer::V3);
         }
-        self.source_file = file_path.clone();
+        self.source_file = file_path.as_ref().to_string_lossy().to_string();
         // init other blocks that should be stored in arena
         self.init().unwrap();
         Ok(())
@@ -811,7 +817,7 @@ mod tests {
     #[test]
     fn mdf3_file_init() {
         let mut file = MDFFile::new();
-        file.open("./mdf3.dat".to_string()).unwrap();
+        file.open("./mdf3.dat").unwrap();
 
         // get out the id block
         assert!(file.id.is_some());
@@ -847,7 +853,7 @@ mod tests {
     #[test]
     fn mdf4_file_init() {
         let mut file = MDFFile::new();
-        file.open("./mdf4.mf4".to_string()).unwrap();
+        file.open("./mdf4.mf4").unwrap();
 
         // get out the id block
         assert!(file.id.is_some());
@@ -866,6 +872,6 @@ mod tests {
     #[should_panic]
     fn error_file_init() {
         let mut file = MDFFile::new();
-        file.open("./error.dbc".to_string()).unwrap();
+        file.open("./error.dbc").unwrap();
     }
 }

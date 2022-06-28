@@ -9,6 +9,7 @@ edition = "2021"
 asammdf_derive = {path="./asammdf_derive"}
 bitflags = "1.3.2"
 chrono = "0.4.19"
+derive_builder = "0.11.2"
 indextree = "4.4.0"
 itertools = "0.10.3"
 libflate = "1.2.0"

@@ -79,13 +79,13 @@ pub struct IDBlock {
 impl IDBlock {
     /// Create a v3::IDBlock with version default to `330`, spec_type default to `SpecVer::V3`
     /// and float_point_format default to `FloatPointFormat::IEEE754`
-    pub fn new(program_id: String, code_page: u16) -> IDBlock {
+    pub fn new<S:AsRef<str>>(program_id: S, code_page: u16) -> IDBlock {
         IDBlock {
             byte_order: None,
             code_page,
             format_id: "3.30    ".to_string(),
             float_point_format: Some(FloatPointFormat::IEEE754),
-            program_id,
+            program_id: program_id.as_ref().to_owned(),
             block_size: 64,
             name: "ID".to_string(),
             file_id: "MDF     ".to_string(),
@@ -361,7 +361,7 @@ impl MDFObject for CGBlock {
 }
 
 impl CGBlock {
-    pub fn new(comment: String) -> CGBlock {
+    pub fn new<S: AsRef<str>>(comment: S) -> CGBlock {
         CGBlock {
             record_id: 0,
             link_cg_comment: 0,
@@ -370,7 +370,7 @@ impl CGBlock {
             link_next_cgblock: 0,
             record_count: 0,
             record_size: 0,
-            comment: comment,
+            comment: comment.as_ref().to_owned(),
             id: "CG".to_string(),
             block_size: 30,
             block_id: None,
