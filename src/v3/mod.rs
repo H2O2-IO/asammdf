@@ -79,7 +79,7 @@ pub struct IDBlock {
 impl IDBlock {
     /// Create a v3::IDBlock with version default to `330`, spec_type default to `SpecVer::V3`
     /// and float_point_format default to `FloatPointFormat::IEEE754`
-    pub fn new<S:AsRef<str>>(program_id: S, code_page: u16) -> IDBlock {
+    pub fn new<S: AsRef<str>>(program_id: S, code_page: u16) -> IDBlock {
         IDBlock {
             byte_order: None,
             code_page,

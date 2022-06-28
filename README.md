@@ -27,8 +27,7 @@ assert_eq!(idblock.version(), 300);
 // get all channel blocks out of MDF file
 let iter = file.get_node_ids::<v3::CNBlock>().unwrap().into_iter();
 // get all record data with recordindex=0 of these channel blocks
-let _: Vec<f64> = iter
-    .map(|node_id| {
+let _: Vec<f64> = iter.map(|node_id| {
         let data = file.get_data_cnblock(ValueFormat::Physical, node_id, 0);
         let name = file.get_node_by_id::<v3::CNBlock>(node_id).unwrap().name();
         println!("({name},{data})");

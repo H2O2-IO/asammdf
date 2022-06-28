@@ -5,7 +5,8 @@ use std::{
     collections::HashMap,
     fmt::Display,
     fs::File,
-    io::{self, BufReader, Read, Seek, SeekFrom}, path::Path,
+    io::{self, BufReader, Read, Seek, SeekFrom},
+    path::Path,
 };
 
 use chrono::{DateTime, Utc};
@@ -46,7 +47,10 @@ pub struct Annotation {
 
 impl Annotation {
     fn new<S: AsRef<str>>(timestamp: f64, text: S) -> Annotation {
-        Annotation { timestamp, text:text.as_ref().to_owned() }
+        Annotation {
+            timestamp,
+            text: text.as_ref().to_owned(),
+        }
     }
 }
 
@@ -367,7 +371,7 @@ impl MDFFile {
         }
     }
 
-    pub fn get_id<T: 'static + IDObject + PermanentBlock>(&mut self)->Option<&T> {
+    pub fn get_id<T: 'static + IDObject + PermanentBlock>(&mut self) -> Option<&T> {
         self.get_node_by_id::<T>(self.id.unwrap())
     }
 
