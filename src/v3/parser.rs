@@ -381,7 +381,7 @@ pub(crate) fn cg_block_basic(input: &[u8]) -> IResult<&[u8], CGBlock> {
         le_u16,
         le_u32,
     ))(input)?;
-    let mut cg_block = CGBlock::new(Default::default());
+    let mut cg_block = CGBlock::new(String::default());
     cg_block.id = String::from_utf8_lossy(id).trim_matches('\0').to_string();
     cg_block.block_size = block_size as _;
 

@@ -1,9 +1,12 @@
+//#![warn(missing_docs)]
+#![doc = include_str!("../README.md")]
 use std::{
     any::Any,
     collections::HashMap,
     fmt::Display,
     fs::File,
     io::{self, BufReader, Read, Seek, SeekFrom},
+    path::Path,
 };
 
 use chrono::{DateTime, Utc};
@@ -43,8 +46,11 @@ pub struct Annotation {
 }
 
 impl Annotation {
-    fn new(timestamp: f64, text: String) -> Annotation {
-        Annotation { timestamp, text }
+    fn new<S: AsRef<str>>(timestamp: f64, text: S) -> Annotation {
+        Annotation {
+            timestamp,
+            text: text.as_ref().to_owned(),
+        }
     }
 }
 
@@ -120,6 +126,7 @@ pub enum ValueFormat {
     RawBin,
 }
 
+enum_u32_convert! {
 #[derive(Clone, Copy, Debug)]
 pub enum RecordIDType {
     Before8Bit = 1,
@@ -128,7 +135,8 @@ pub enum RecordIDType {
     Before64Bit = 8,
     BeforeAndAfter8Bit = 255,
 }
-
+}
+enum_u32_convert! {
 #[derive(Clone, Copy, Debug)]
 pub enum SignalType {
     UIntLE,
@@ -147,7 +155,7 @@ pub enum SignalType {
     CANOPENData,
     CANOPENTime,
 }
-
+}
 impl SignalType {
     pub fn from_u16(value: u16, byte_order: ByteOrder) -> Option<SignalType> {
         match value {
@@ -185,19 +193,22 @@ impl SignalType {
     }
 }
 
+enum_u32_convert! {
 #[derive(Clone, Copy, Debug)]
 pub enum SyncType {
-    Time,
+    Time=1,
     Angle,
     Distance,
     Index,
 }
+}
+enum_u32_convert! {
 #[derive(Clone, Copy, Debug)]
 pub enum TimeFlagsType {
     LocalTime = 1,
     OffsetsValid,
 }
-
+}
 enum_u32_convert! {
 #[derive(Clone, Copy, Debug)]
 pub enum TimeQualityType {
@@ -272,6 +283,10 @@ impl DependencyType {
     }
 }
 
+pub trait DependencyObject {
+    fn create_dependencies(&self, mdf_file: &MDFFile);
+}
+
 pub trait DGObject {}
 
 pub trait CGObject<'a, CN, DG, SR> {
@@ -308,18 +323,21 @@ pub enum MDFErrorKind {
     CCBlockError(String),
     CEBlockError(String),
     VersionError(String),
+    UnsupportedZipType,
+    ZippedReaderError,
 }
 
 /// MDFFile
-/// 
+///
 /// Example:
-/// 
+///
 /// ```
+/// use asammdf::{MDFFile,SpecVer};
 /// let mut file = MDFFile::new();
-/// file.open("./mdf3.dat".to_string()).unwrap();
+/// file.open("./mdf3.dat").unwrap();
 /// assert_eq!(file.spec_ver,Some(SpecVer::V3));
 /// ```
-/// 
+///
 /// TODO: use memory map file to parse file for better performance
 #[derive(Debug)]
 pub struct MDFFile {
@@ -334,9 +352,9 @@ pub struct MDFFile {
     /// file handler to the source file
     file_handler: Option<File>,
     /// specification version read from ID block
-    spec_ver: Option<SpecVer>,
+    pub spec_ver: Option<SpecVer>,
     /// a cache for link between id and blockid
-    link_id_blocks: HashMap<u64, BlockId>,
+    pub(crate) link_id_blocks: HashMap<u64, BlockId>,
 }
 
 impl MDFFile {
@@ -351,6 +369,10 @@ impl MDFFile {
             spec_ver: Default::default(),
             link_id_blocks: HashMap::new(),
         }
+    }
+
+    pub fn get_id<T: 'static + IDObject + PermanentBlock>(&mut self) -> Option<&T> {
+        self.get_node_by_id::<T>(self.id.unwrap())
     }
 
     /// when use buffer reader, make sure to use SeekFrom::Start
@@ -380,7 +402,7 @@ impl MDFFile {
     }
 
     /// open a file, and than parse PermanentBlocks
-    pub fn open(&mut self, file_path: String) -> Result<(), MDFErrorKind> {
+    pub fn open<P: AsRef<Path>>(&mut self, file_path: P) -> Result<(), MDFErrorKind> {
         let mut file = File::open(&file_path).map_err(|x| MDFErrorKind::IOError(x))?;
         self.file_handler = Some(file.try_clone().map_err(|x| MDFErrorKind::IOError(x))?);
         let mut idblock_buf = [0; 64];
@@ -409,7 +431,7 @@ impl MDFFile {
             self.id = Some(self.arena.new_node(Box::new(idblock)));
             self.spec_ver = Some(SpecVer::V3);
         }
-        self.source_file = file_path.clone();
+        self.source_file = file_path.as_ref().to_string_lossy().to_string();
         // init other blocks that should be stored in arena
         self.init().unwrap();
         Ok(())
@@ -426,7 +448,9 @@ impl MDFFile {
                 .map_or(ByteOrder::LittleEndian, |x| x);
             // v3::hdblock
             v3::HDBlock::parse(byte_order, self)?;
-        } else if self.spec_ver.is_some() {
+        } else if self.is_v4() {
+            // v4::hdblock
+            v4::HDBlock::parse(ByteOrder::LittleEndian, self)?;
         } else {
             return Err(MDFErrorKind::VersionError(
                 "MDF Specification Verion unsupported!".into(),
@@ -590,6 +614,8 @@ impl MDFFile {
                     self.get_format_value_by_array(format, id, data, 0, false)
                 }
             }
+        } else if self.is_v4() {
+            f64::NAN
         } else {
             f64::NAN
         }
@@ -795,7 +821,7 @@ mod tests {
     #[test]
     fn mdf3_file_init() {
         let mut file = MDFFile::new();
-        file.open("./mdf3.dat".to_string()).unwrap();
+        file.open("./mdf3.dat").unwrap();
 
         // get out the id block
         assert!(file.id.is_some());
@@ -831,7 +857,7 @@ mod tests {
     #[test]
     fn mdf4_file_init() {
         let mut file = MDFFile::new();
-        file.open("./mdf4.mf4".to_string()).unwrap();
+        file.open("./mdf4.mf4").unwrap();
 
         // get out the id block
         assert!(file.id.is_some());
@@ -850,6 +876,6 @@ mod tests {
     #[should_panic]
     fn error_file_init() {
         let mut file = MDFFile::new();
-        file.open("./error.dbc".to_string()).unwrap();
+        file.open("./error.dbc").unwrap();
     }
 }

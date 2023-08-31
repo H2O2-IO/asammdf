@@ -27,13 +27,30 @@ pub fn mdf_object(_args: TokenStream, input:TokenStream) -> TokenStream{
 
 /// used in normal blocks (except ID Block)
 #[proc_macro_attribute]
-pub fn normal_object(_args: TokenStream, input:TokenStream) -> TokenStream{
+pub fn normal_object_v3(_args: TokenStream, input:TokenStream) -> TokenStream{
     let mut item_struct = parse_macro_input!(input as ItemStruct);
     let _ = parse_macro_input!(_args as parse::Nothing);
 
     if let syn::Fields::Named(ref mut fields) = item_struct.fields {
         fields.named.push(get_field_def(quote! { pub id:String}));
         fields.named.push(get_field_def(quote! { pub block_size:u64}));
+    }
+
+    return quote! {
+        #item_struct
+    }
+    .into();
+}
+
+#[proc_macro_attribute]
+pub fn normal_object_v4(_args: TokenStream, input:TokenStream) -> TokenStream{
+    let mut item_struct = parse_macro_input!(input as ItemStruct);
+    let _ = parse_macro_input!(_args as parse::Nothing);
+
+    if let syn::Fields::Named(ref mut fields) = item_struct.fields {
+        fields.named.push(get_field_def(quote! { pub id:String}));
+        fields.named.push(get_field_def(quote! { pub block_size:u64}));
+        fields.named.push(get_field_def(quote! { links_count:u64}));
     }
 
     return quote! {
@@ -221,7 +238,31 @@ fn impl_permanent_block_derive(ast: &DeriveInput) -> TokenStream {
     let name = &ast.ident;
     
     let gen = quote! {
-        impl PermanentBlock for #name {}
+        impl PermanentBlock for #name {
+        }
     };
     gen.into()
+}
+
+#[proc_macro_attribute]
+pub fn channel_conversion_object(_args: TokenStream, input:TokenStream) -> TokenStream{
+    let mut item_struct = parse_macro_input!(input as ItemStruct);
+    let _ = parse_macro_input!(_args as parse::Nothing);
+
+    if let syn::Fields::Named(ref mut fields) = item_struct.fields {
+        fields.named.push(get_field_def(quote! { pub conversion_type: Option<ConversionType> }));
+        fields.named.push(get_field_def(quote! { pub default_text: String}));
+        fields.named.push(get_field_def(quote! { pub formula: String}));
+        fields.named.push(get_field_def(quote! { pub inv_ccblock: Option<BlockId>}));
+        fields.named.push(get_field_def(quote! { pub max: f64}));
+        fields.named.push(get_field_def(quote! { pub min: f64}));
+        fields.named.push(get_field_def(quote! { pub params: Option<Vec<f64>>}));
+        fields.named.push(get_field_def(quote! { pub tab_size: u16}));
+        fields.named.push(get_field_def(quote! { pub unit: String}));
+    }
+
+    return quote! {
+        #item_struct
+    }
+    .into();
 }

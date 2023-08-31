@@ -1,4 +1,4 @@
-use crate::ConversionType;
+use crate::{BlockId, ConversionType, MDFFile, PermanentBlock};
 
 /// params of `ConversionType::Rational` with transform (self) -> (self)
 pub const RATIONAL_PARAM_ARRAY_I: [f64; 6] = [0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
@@ -46,7 +46,7 @@ pub(crate) mod helper {
     use nom::{
         bytes::complete::take,
         multi::count,
-        number::complete::{le_f32, le_f64, le_i16, le_u16, le_u32, le_u64},
+        number::complete::{le_f32, le_f64, le_i16, le_i64, le_u16, le_u32, le_u64},
         IResult,
     };
     pub(crate) fn read_le_u16(input: &[u8]) -> IResult<&[u8], u16> {
@@ -70,6 +70,9 @@ pub(crate) mod helper {
     pub(crate) fn read_le_i16(input: &[u8]) -> IResult<&[u8], i16> {
         Ok(le_i16(input)?)
     }
+    pub(crate) fn read_le_i64(input: &[u8]) -> IResult<&[u8], i64> {
+        Ok(le_i64(input)?)
+    }
     pub(crate) fn read_str(input: &[u8], count: u32) -> IResult<&[u8], String> {
         let (input, result) = take(count)(input)?;
         let result = String::from_utf8_lossy(result)
@@ -77,4 +80,11 @@ pub(crate) mod helper {
             .to_string();
         Ok((input, result))
     }
+}
+
+pub(crate) fn save_to_arena_store_block_id<B>(block: B, parent_id: BlockId, mdf_file: &mut MDFFile)
+where
+    B: PermanentBlock,
+{
+    // TODO: edit PermanetBlock to satisfy this method
 }
