@@ -2,6 +2,11 @@
 name = "asammdf"
 version = "0.1.0"
 edition = "2021"
+authors = [ "cupofc0t <cupofc0t@gmail.com>" ]
+description = "Read and write ASAM MDF file, simply and efficiently."
+license = "Apache-2.0"
+repository = "https://github.com/H2O2-IO/asammdf"
+keywords = [ "asam", "mdf", "measurement", "data" ]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

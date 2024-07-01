@@ -1,7 +1,7 @@
 asammdf
 ==========
 
-Read and write ASAM MDF file, simply and efficiently.
+Read and write ASAM MDF file, simply and efficiently. Currently under development, and not ready for production use.
 
 Features
 --------
