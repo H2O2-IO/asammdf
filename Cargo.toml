@@ -11,7 +11,7 @@ keywords = [ "asam", "mdf", "measurement", "data" ]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-asammdf_derive = {path="./asammdf_derive"}
+asammdf_derive = "0.1.0"
 bitflags = "1.3.2"
 chrono = "0.4.19"
 derive_builder = "0.11.2"
