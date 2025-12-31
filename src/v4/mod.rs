@@ -1396,7 +1396,7 @@ impl DLBlock {
         // go to next pos, and construct dl block
         buf_reader.seek(SeekFrom::Start(next_pos)).unwrap();
 
-        let mut data = vec![0; 1];
+        let mut data = vec![0; 16];
         buf_reader.read_exact(&mut data).unwrap();
         let mut dl_block = dl_block_basic(&data, id, block_size, links.len() as u64)
             .unwrap()
@@ -2438,11 +2438,10 @@ impl CCBlock {
                             vec_f64.push(read_le_f64(&buf).unwrap().1);
                         }
                         let mut vec_str = Vec::with_capacity(links.len() - 4);
-                        for i in 0..(links.len() - 4) {
-                            let link_address = links[4 + i];
+                        for link_address in links.iter().skip(4).filter(|&&l| l != 0) {
                             let val_block = RDSDBlock::parse(
                                 ByteOrder::LittleEndian,
-                                link_address as u64,
+                                *link_address as u64,
                                 instance,
                             )?;
                             vec_str.push(String::from_utf8_lossy(&val_block.data).to_string());
@@ -2473,11 +2472,10 @@ impl CCBlock {
                             idx += 1;
                         }
                         let mut vec_str = Vec::with_capacity(links.len() - 4);
-                        for i in 0..(links.len() - 4) {
-                            let link_address = links[4 + i];
+                        for link_address in links.iter().skip(4).filter(|&&l| l != 0) {
                             let val_block = RDSDBlock::parse(
                                 ByteOrder::LittleEndian,
-                                link_address as u64,
+                                *link_address as u64,
                                 instance,
                             )?;
                             vec_str.push(String::from_utf8_lossy(&val_block.data).to_string());
